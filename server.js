@@ -228,7 +228,25 @@ app.delete('/api/sales/:id', async (req, res) => {
   await Sales.findByIdAndDelete(req.params.id);
   res.json({ message: 'Deleted' });
 });
+// Worker Report
+const WorkerReportSchema = new mongoose.Schema({ date: String, siteId: String, workerName: String, remuneration: Number, workingArea: Number, workAmount: Number, paymentMode: String, materialAmount: Number, notes: String, signatures: Object, addedBy: String }, { timestamps: true });
+const WorkerReport = mongoose.model("WorkerReport", WorkerReportSchema);
+app.get("/api/workerreport", async (req, res) => { res.json(await WorkerReport.find().sort({ createdAt: -1 })); });
+app.post("/api/workerreport", async (req, res) => { const item = new WorkerReport(req.body); await item.save(); res.json(item); });
+app.put("/api/workerreport/:id", async (req, res) => { res.json(await WorkerReport.findByIdAndUpdate(req.params.id, req.body, { new: true })); });
 
+// Daily Report
+const DailyReportSchema = new mongoose.Schema({ date: String, newSiteDetails: String, workersDetails: String, materialsSupplied: String, complaints: String, paymentsReceived: String, payments: Array, dayExpenses: String, expenseAmount: Number, notes: String, addedBy: String }, { timestamps: true });
+const DailyReport = mongoose.model("DailyReport", DailyReportSchema);
+app.get("/api/dailyreport", async (req, res) => { res.json(await DailyReport.find().sort({ createdAt: -1 })); });
+app.post("/api/dailyreport", async (req, res) => { const item = new DailyReport(req.body); await item.save(); res.json(item); });
+
+// Work Plan
+const WorkPlanSchema = new mongoose.Schema({ fromDate: String, toDate: String, site: String, plannedWork: String, workersAllocated: String, materialsNeeded: String, estimatedCost: Number, paymentPlan: String, notes: String, status: String, addedBy: String }, { timestamps: true });
+const WorkPlan = mongoose.model("WorkPlan", WorkPlanSchema);
+app.get("/api/workplan", async (req, res) => { res.json(await WorkPlan.find().sort({ createdAt: -1 })); });
+app.post("/api/workplan", async (req, res) => { const item = new WorkPlan(req.body); await item.save(); res.json(item); });
+app.put("/api/workplan/:id", async (req, res) => { res.json(await WorkPlan.findByIdAndUpdate(req.params.id, req.body, { new: true })); });
 // ─── START SERVER ─────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 5000;
 // ─── SITE WORK ROUTES ─────────────────────────────────────────────────────────
