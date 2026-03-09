@@ -236,10 +236,24 @@ app.post("/api/workerreport", async (req, res) => { const item = new WorkerRepor
 app.put("/api/workerreport/:id", async (req, res) => { res.json(await WorkerReport.findByIdAndUpdate(req.params.id, req.body, { new: true })); });
 
 // Daily Report
-const DailyReportSchema = new mongoose.Schema({ date: String, newSiteDetails: String, workersDetails: String, materialsSupplied: String, complaints: String, paymentsReceived: String, payments: Array, dayExpenses: String, expenseAmount: Number, notes: String, addedBy: String }, { timestamps: true });
+const DailyReportSchema = new mongoose.Schema({
+  date: String,
+  newSite: Object,
+  runningSite: Object,
+  completedSite: Object,
+  workers: Array,
+  workerSite: String,
+  materialSupply: Object,
+  complaints: Array,
+  payments: Array,
+  dayNotes: String,
+  expenses: Array,
+  addedBy: String
+}, { timestamps: true });
 const DailyReport = mongoose.model("DailyReport", DailyReportSchema);
 app.get("/api/dailyreport", async (req, res) => { res.json(await DailyReport.find().sort({ createdAt: -1 })); });
 app.post("/api/dailyreport", async (req, res) => { const item = new DailyReport(req.body); await item.save(); res.json(item); });
+app.put("/api/dailyreport/:id", async (req, res) => { res.json(await DailyReport.findByIdAndUpdate(req.params.id, req.body, { new: true })); });
 
 // Work Plan
 const WorkPlanSchema = new mongoose.Schema({ fromDate: String, toDate: String, site: String, plannedWork: String, workersAllocated: String, materialsNeeded: String, estimatedCost: Number, paymentPlan: String, notes: String, status: String, addedBy: String }, { timestamps: true });
