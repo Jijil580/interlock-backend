@@ -252,7 +252,52 @@ const DailyReportSchema = new mongoose.Schema({
 }, { timestamps: true });
 const DailyReport = mongoose.model("DailyReport", DailyReportSchema);
 app.get("/api/dailyreport", async (req, res) => { res.json(await DailyReport.find().sort({ createdAt: -1 })); });
-app.post("/api/dailyreport", async (req, res) => { const item = new DailyReport(req.body); await item.save(); res.json(item); });
+app.post("/api/dailyreport", async (req, res) => {
+  try {
+    const item = new DailyReport(req.body);
+    await item.save();
+
+    const { newSite, runningSite, completedSite } = req.body;
+
+    if (newSite?.siteName) {
+      const exists = await SiteWork.findOne({ customerName: newSite.siteName });
+      if (!exists) {
+        await new SiteWork({
+          customerName: newSite.siteName,
+          location: newSite.location || "",
+          date: newSite.startDate || req.body.date,
+          workStatus: "ongoing",
+          totalAmount: +newSite.totalCost || 0,
+          paidAmount: +newSite.amountReceived || 0,
+          pendingAmount: (+newSite.totalCost || 0) - (+newSite.amountReceived || 0),
+          notes: `Client: ${newSite.clientName || ""} | Interlock: ${newSite.interlockType || ""} | Area: ${newSite.totalWorkArea || ""} sqft`,
+          addedBy: req.body.addedBy,
+          company: "Al-Noor"
+        }).save();
+      }
+    }
+
+    if (runningSite?.siteName) {
+      await SiteWork.findOneAndUpdate(
+        { customerName: runningSite.siteName },
+        { workStatus: "ongoing", paidAmount: +runningSite.amountReceived || 0, totalAmount: +runningSite.totalCost || 0, pendingAmount: (+runningSite.totalCost || 0) - (+runningSite.amountReceived || 0) },
+        { upsert: true }
+      );
+    }
+
+    if (completedSite?.siteName) {
+      await SiteWork.findOneAndUpdate(
+        { customerName: completedSite.siteName },
+        { workStatus: "completed", paidAmount: +completedSite.totalAmountReceived || 0, totalAmount: +completedSite.totalCost || 0, pendingAmount: +completedSite.finalPendingAmount || 0 },
+        { upsert: true }
+      );
+    }
+
+    res.json(item);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 app.put("/api/dailyreport/:id", async (req, res) => { res.json(await DailyReport.findByIdAndUpdate(req.params.id, req.body, { new: true })); });
 
 // Work Plan
