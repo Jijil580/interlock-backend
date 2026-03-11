@@ -238,16 +238,12 @@ app.put("/api/workerreport/:id", async (req, res) => { res.json(await WorkerRepo
 // Daily Report
 const DailyReportSchema = new mongoose.Schema({
   date: String,
-  newSite: Object,
-  runningSite: Object,
-  completedSite: Object,
-  workers: Array,
-  workerSite: String,
-  materialSupply: Object,
-  complaints: Array,
-  payments: Array,
-  dayNotes: String,
-  expenses: Array,
+  newSite: String,
+  runningSite: String,
+  materialSupply: String,
+  complaints: String,
+  dayNote: String,
+  expenses: String,
   addedBy: String
 }, { timestamps: true });
 const DailyReport = mongoose.model("DailyReport", DailyReportSchema);
