@@ -240,8 +240,10 @@ const DailyReportSchema = new mongoose.Schema({
   date: String,
   newSite: String,
   runningSite: String,
+  workersDetail: String,
   materialSupply: String,
   complaints: String,
+  payments: String,
   dayNote: String,
   expenses: String,
   addedBy: String
