@@ -229,7 +229,24 @@ app.delete('/api/sales/:id', async (req, res) => {
   res.json({ message: 'Deleted' });
 });
 // Worker Report
-const WorkerReportSchema = new mongoose.Schema({ date: String, siteId: String, workerName: String, remuneration: Number, workingArea: Number, workAmount: Number, paymentMode: String, materialAmount: Number, notes: String, signatures: Object, addedBy: String }, { timestamps: true });
+const WorkerReportSchema = new mongoose.Schema({
+  siteName: String,
+  phoneNo: String,
+  startingDate: String,
+  workerName: String,
+  totalArea: String,
+  workingCost: String,
+  extraWork: String,
+  extraMaterial: String,
+  totalWorkingArea: String,
+  totalAmount: String,
+  note: String,
+  paymentMode: String,
+  amountReceivedBy: String,
+  materialSupply: String,
+  signatures: { supervisor: Boolean, office: Boolean, admin: Boolean },
+  addedBy: String
+}, { timestamps: true });
 const WorkerReport = mongoose.model("WorkerReport", WorkerReportSchema);
 app.get("/api/workerreport", async (req, res) => { res.json(await WorkerReport.find().sort({ createdAt: -1 })); });
 app.post("/api/workerreport", async (req, res) => { const item = new WorkerReport(req.body); await item.save(); res.json(item); });
