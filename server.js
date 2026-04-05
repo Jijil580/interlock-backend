@@ -230,6 +230,7 @@ app.delete('/api/sales/:id', async (req, res) => {
 });
 // Worker Report
 const WorkerReportSchema = new mongoose.Schema({
+  upiId: String, bankName: String, bankBranch: String, bankAccount: String, materialType: String,
   siteName: String,
   phoneNo: String,
   startingDate: String,
@@ -255,8 +256,7 @@ app.put("/api/workerreport/:id", async (req, res) => { res.json(await WorkerRepo
 
 // Daily Report
 const DailyReportSchema = new mongoose.Schema({
-  workerPayments: [{ workerName: String, amount: Number, date: String, note: String }],
-  date: String,
+  workerPayments: [{ workerName: String, amount: Number, date: String, note: String }],workerPayments: [{ workerName: String, amount: Number, date: String, note: String }],  date: String,
   newSite: String,
   runningSite: String,
   workersDetail: String,
@@ -339,6 +339,24 @@ app.get("/api/sitework", async (req, res) => { res.json(await SiteWork.find().so
 app.post("/api/sitework", async (req, res) => { const item = new SiteWork(req.body); await item.save(); res.json(item); });
 app.put("/api/sitework/:id", async (req, res) => { res.json(await SiteWork.findByIdAndUpdate(req.params.id, req.body, { new: true })); });
 app.delete("/api/sitework/:id", async (req, res) => { await SiteWork.findByIdAndDelete(req.params.id); res.json({ message: "Deleted" }); });
+// Workers
+const WorkerSchema = new mongoose.Schema({
+  name: String, phone: String, role: String, addedBy: String
+}, { timestamps: true });
+const Worker = mongoose.model("Worker", WorkerSchema);
+
+app.get("/api/workers", async (req, res) => { res.json(await Worker.find().sort({ name: 1 })); });
+app.post("/api/workers", async (req, res) => { res.json(await Worker.create(req.body)); });
+
+// Worker Payments
+const WorkerPaymentSchema = new mongoose.Schema({
+  workerName: String, amount: Number, date: String,
+  note: String, addedBy: String, source: String, reportDate: String
+}, { timestamps: true });
+const WorkerPayment = mongoose.model("WorkerPayment", WorkerPaymentSchema);
+
+app.get("/api/workerpayments", async (req, res) => { res.json(await WorkerPayment.find().sort({ date: -1 })); });
+app.post("/api/workerpayments", async (req, res) => { res.json(await WorkerPayment.create(req.body)); });
 // Workers
 const WorkerSchema = new mongoose.Schema({
   name: String, phone: String, role: String, addedBy: String
