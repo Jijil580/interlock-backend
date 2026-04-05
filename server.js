@@ -341,6 +341,7 @@ app.put("/api/sitework/:id", async (req, res) => { res.json(await SiteWork.findB
 app.delete("/api/sitework/:id", async (req, res) => { await SiteWork.findByIdAndDelete(req.params.id); res.json({ message: "Deleted" }); });
 // Workers
 const WorkerSchema = new mongoose.Schema({
+  address: String, rateType: String, rateAmount: Number,
   name: String, phone: String, role: String, addedBy: String
 }, { timestamps: true });
 const Worker = mongoose.model("Worker", WorkerSchema);
@@ -375,6 +376,18 @@ const WorkerPayment = mongoose.model("WorkerPayment", WorkerPaymentSchema);
 
 app.get("/api/workerpayments", async (req, res) => { res.json(await WorkerPayment.find().sort({ date: -1 })); });
 app.post("/api/workerpayments", async (req, res) => { res.json(await WorkerPayment.create(req.body)); });
+// Purchases
+const PurchaseSchema = new mongoose.Schema({
+  date: String, supplierName: String, supplierPhone: String, supplierAddress: String,
+  itemName: String, itemType: String, quantity: String, unit: String,
+  unitPrice: String, totalAmount: Number, paymentMode: String,
+  vehicleNumber: String, vehicleType: String, driverName: String, driverPhone: String,
+  deliveryAddress: String, note: String, addedBy: String
+}, { timestamps: true });
+const Purchase = mongoose.model("Purchase", PurchaseSchema);
+
+app.get("/api/purchases", async (req, res) => { res.json(await Purchase.find().sort({ createdAt: -1 })); });
+app.post("/api/purchases", async (req, res) => { res.json(await Purchase.create(req.body)); });
 app.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
   await seedData();
