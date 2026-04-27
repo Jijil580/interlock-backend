@@ -388,6 +388,28 @@ const Purchase = mongoose.model("Purchase", PurchaseSchema);
 
 app.get("/api/purchases", async (req, res) => { res.json(await Purchase.find().sort({ createdAt: -1 })); });
 app.post("/api/purchases", async (req, res) => { res.json(await Purchase.create(req.body)); });
+
+// Master Data
+const MasterDataSchema = new mongoose.Schema({ name:String, category:String, shape:String, color:String, size:String, thickness:String, pricePerSqft:Number, pricePerSqm:Number, unit:String, price:Number, stock:Number, rate:Number, rateType:String, description:String, notes:String, addedBy:String }, {timestamps:true});
+const MasterInterlock = mongoose.model("MasterInterlock", MasterDataSchema);
+const MasterMaterial = mongoose.model("MasterMaterial", MasterDataSchema);
+const MasterLabor = mongoose.model("MasterLabor", MasterDataSchema);
+const MasterExtraWork = mongoose.model("MasterExtraWork", MasterDataSchema);
+
+["interlock","materials","labor","extrawork"].forEach(type => {
+  const Model = {interlock:MasterInterlock,materials:MasterMaterial,labor:MasterLabor,extrawork:MasterExtraWork}[type];
+  app.get(`/api/masterdata/${type}`, async(req,res)=>res.json(await Model.find()));
+  app.post(`/api/masterdata/${type}`, async(req,res)=>res.json(await Model.create(req.body)));
+  app.put(`/api/masterdata/${type}/:id`, async(req,res)=>res.json(await Model.findByIdAndUpdate(req.params.id,req.body,{new:true})));
+  app.delete(`/api/masterdata/${type}/:id`, async(req,res)=>{await Model.findByIdAndDelete(req.params.id);res.json({ok:true});});
+});
+
+// Extra routes
+app.put('/api/workers/:id', async(req,res)=>res.json(await Worker.findByIdAndUpdate(req.params.id,req.body,{new:true})));
+app.delete('/api/workers/:id', async(req,res)=>{await Worker.findByIdAndDelete(req.params.id);res.json({ok:true});});
+app.delete('/api/sitework/:id', async(req,res)=>{await SiteWork.findByIdAndDelete(req.params.id);res.json({ok:true});});
+app.delete('/api/stock/:id', async(req,res)=>{await Stock.findByIdAndDelete(req.params.id);res.json({ok:true});});
+app.delete('/api/raw/:id', async(req,res)=>{await Raw.findByIdAndDelete(req.params.id);res.json({ok:true});});
 app.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
   await seedData();
