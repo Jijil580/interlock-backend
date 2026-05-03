@@ -20,7 +20,7 @@ const SiteWorkSchema = new mongoose.Schema({ customerName:String, phone:String, 
 const WorkerReportSchema = new mongoose.Schema({ siteName:String, phoneNo:String, startingDate:String, workerName:String, totalArea:String, workingCost:String, extraWork:String, extraMaterial:String, totalWorkingArea:String, totalAmount:String, note:String, paymentMode:String, upiId:String, bankName:String, bankBranch:String, bankAccount:String, amountReceivedBy:String, materialSupply:String, materialType:String, signatures:{supervisor:Boolean,office:Boolean,admin:Boolean}, addedBy:String }, {timestamps:true});
 const DailyReportSchema = new mongoose.Schema({ date:String, newSite:String, runningSite:String, workersDetail:String, materialSupply:String, complaints:String, payments:String, dayNote:String, expenses:String, addedBy:String, workerPayments:[{workerName:String,amount:Number,date:String,note:String}] }, {timestamps:true});
 const WorkPlanSchema = new mongoose.Schema({ date:String, siteName:String, task:String, workers:String, materials:String, note:String, status:{type:String,default:'planned'}, fromDate:String, toDate:String, site:String, plannedWork:String, workersAllocated:String, materialsNeeded:String, estimatedCost:Number, paymentPlan:String, notes:String, addedBy:String }, {timestamps:true});
-const WorkerSchema = new mongoose.Schema({ name:String, phone:String, address:String, role:String, rateType:String, rateAmount:Number, addedBy:String }, {timestamps:true});
+const WorkerSchema = new mongoose.Schema({ name:String, phone:String, address:String, role:String, workerCategory:String, workLocationType:String, paymentType:String, customPaymentType:String, rateType:String, rateAmount:Number, addedBy:String }, {timestamps:true});
 const WorkerPaymentSchema = new mongoose.Schema({ workerName:String, amount:Number, date:String, note:String, addedBy:String, source:String, reportDate:String }, {timestamps:true});
 const PurchaseSchema = new mongoose.Schema({ date:String, supplierName:String, supplierPhone:String, supplierAddress:String, itemName:String, itemType:String, quantity:String, unit:String, unitPrice:String, totalAmount:Number, paymentMode:String, vehicleNumber:String, vehicleType:String, driverName:String, driverPhone:String, deliveryAddress:String, note:String, addedBy:String }, {timestamps:true});
 const MasterDataSchema = new mongoose.Schema({ name:String, category:String, shape:String, color:String, size:String, thickness:String, pricePerSqft:Number, pricePerSqm:Number, unit:String, price:Number, stock:Number, rate:Number, rateType:String, description:String, notes:String, addedBy:String }, {timestamps:true});
@@ -57,12 +57,7 @@ async function seedData() {
 app.get('/api/users', async(req,res)=>res.json(await User.find({},'-password')));
 app.post('/api/users', async(req,res)=>{ try{ const {name,username,password,role,company}=req.body; const avatar=name.split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase(); res.json(await User.create({name,username,password,role,avatar,company:company||'default'})); }catch(e){res.status(400).json({message:e.message});} });
 app.put('/api/users/:id', async(req,res)=>res.json(await User.findByIdAndUpdate(req.params.id,req.body,{new:true})));
-app.post('/api/login', async(req,res)=>{
-  const {username,password}=req.body;
-  const user = await User.findOne({username,password,active:true});
-  if(!user) return res.status(401).json({message:'Invalid credentials'});
-  res.json({_id:user._id,name:user.name,username:user.username,role:user.role,avatar:user.avatar,company:user.company});
-});
+
 app.get('/api/stock', async(req,res)=>res.json(await Stock.find()));
 app.post('/api/stock', async(req,res)=>res.json(await Stock.create(req.body)));
 app.put('/api/stock/:id', async(req,res)=>res.json(await Stock.findByIdAndUpdate(req.params.id,req.body,{new:true})));
@@ -119,6 +114,22 @@ const masterModels = {interlock:MasterInterlock,materials:MasterMaterial,labor:M
   app.put(`/api/masterdata/${type}/:id`, async(req,res)=>res.json(await Model.findByIdAndUpdate(req.params.id,req.body,{new:true})));
   app.delete(`/api/masterdata/${type}/:id`, async(req,res)=>{await Model.findByIdAndDelete(req.params.id);res.json({ok:true});});
 });
+
+// Suppliers
+const SupplierSchema = new mongoose.Schema({ name:String, location:String, phone:String, materials:[String], customMaterial:String, note:String, addedBy:String }, {timestamps:true});
+const Supplier = mongoose.model("Supplier", SupplierSchema);
+app.get("/api/suppliers", async(req,res)=>res.json(await Supplier.find().sort({name:1})));
+app.post("/api/suppliers", async(req,res)=>res.json(await Supplier.create(req.body)));
+app.put("/api/suppliers/:id", async(req,res)=>res.json(await Supplier.findByIdAndUpdate(req.params.id,req.body,{new:true})));
+app.delete("/api/suppliers/:id", async(req,res)=>{await Supplier.findByIdAndDelete(req.params.id);res.json({ok:true});});
+
+// Production Site
+const ProductionSiteSchema = new mongoose.Schema({ date:String, workType:String, notes:String, attendance:Array, totalCost:Number, addedBy:String }, {timestamps:true});
+const ProductionSiteEntry = mongoose.model("ProductionSiteEntry", ProductionSiteSchema);
+app.get("/api/productionsite", async(req,res)=>res.json(await ProductionSiteEntry.find().sort({date:-1})));
+app.post("/api/productionsite", async(req,res)=>res.json(await ProductionSiteEntry.create(req.body)));
+app.put("/api/productionsite/:id", async(req,res)=>res.json(await ProductionSiteEntry.findByIdAndUpdate(req.params.id,req.body,{new:true})));
+
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, async()=>{
