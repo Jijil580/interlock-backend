@@ -57,6 +57,14 @@ async function seedData() {
 app.get('/api/users', async(req,res)=>res.json(await User.find({},'-password')));
 app.post('/api/users', async(req,res)=>{ try{ const {name,username,password,role,company}=req.body; const avatar=name.split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase(); res.json(await User.create({name,username,password,role,avatar,company:company||'default'})); }catch(e){res.status(400).json({message:e.message});} });
 app.put('/api/users/:id', async(req,res)=>res.json(await User.findByIdAndUpdate(req.params.id,req.body,{new:true})));
+app.post('/api/login', async(req,res)=>{
+  try {
+    const {username,password}=req.body;
+    const user = await User.findOne({username,password,active:true});
+    if(!user) return res.status(401).json({message:'Invalid credentials'});
+    res.json({_id:user._id,name:user.name,username:user.username,role:user.role,avatar:user.avatar,company:user.company});
+  } catch(e){ res.status(500).json({message:'Server error'}); }
+});
 
 app.get('/api/stock', async(req,res)=>res.json(await Stock.find()));
 app.post('/api/stock', async(req,res)=>res.json(await Stock.create(req.body)));
