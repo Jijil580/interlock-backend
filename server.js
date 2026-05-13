@@ -22,6 +22,36 @@ const DailyReportSchema = new mongoose.Schema({ date:String, siteName:String, si
 const WorkPlanSchema = new mongoose.Schema({ date:String, siteName:String, task:String, workers:String, materials:String, note:String, status:{type:String,default:'planned'}, fromDate:String, toDate:String, site:String, plannedWork:String, workersAllocated:String, materialsNeeded:String, estimatedCost:Number, paymentPlan:String, notes:String, addedBy:String }, {timestamps:true});
 const WorkerSchema = new mongoose.Schema({ name:String, phone:String, address:String, role:String, workerCategory:String, workLocationType:String, paymentType:String, customPaymentType:String, rateType:String, rateAmount:Number, addedBy:String }, {timestamps:true});
 const WorkerPaymentSchema = new mongoose.Schema({ workerName:String, amount:Number, date:String, note:String, addedBy:String, source:String, reportDate:String }, {timestamps:true});
+const SitePaymentSchema = new mongoose.Schema({
+  siteId:String,
+  siteName:String,
+
+  paymentType:{
+    type:String,
+    default:"Advance"
+  },
+
+  amount:{
+    type:Number,
+    default:0
+  },
+
+  paymentMode:{
+    type:String,
+    default:"Cash"
+  },
+
+  note:String,
+
+  date:String,
+
+  addedBy:String,
+
+  company:String
+
+}, {timestamps:true});
+
+
 const PurchaseSchema = new mongoose.Schema({ date:String, supplierName:String, supplierPhone:String, supplierAddress:String, itemName:String, itemType:String, quantity:String, unit:String, unitPrice:String, totalAmount:Number, paymentMode:String, vehicleNumber:String, vehicleType:String, driverName:String, driverPhone:String, deliveryAddress:String, note:String, addedBy:String }, {timestamps:true});
 const MasterDataSchema = new mongoose.Schema({ name:String, category:String, shape:String, color:String, size:String, thickness:String, pricePerSqft:Number, pricePerSqm:Number, unit:String, price:Number, stock:Number, rate:Number, rateType:String, description:String, notes:String, addedBy:String }, {timestamps:true});
 
@@ -36,6 +66,7 @@ const DailyReport = mongoose.model('DailyReport', DailyReportSchema);
 const WorkPlan = mongoose.model('WorkPlan', WorkPlanSchema);
 const Worker = mongoose.model('Worker', WorkerSchema);
 const WorkerPayment = mongoose.model('WorkerPayment', WorkerPaymentSchema);
+const SitePayment = mongoose.model('SitePayment', SitePaymentSchema);
 const Purchase = mongoose.model('Purchase', PurchaseSchema);
 const MasterInterlock = mongoose.model('MasterInterlock', MasterDataSchema);
 const MasterMaterial = mongoose.model('MasterMaterial', new mongoose.Schema({...MasterDataSchema.obj},{timestamps:true}));
@@ -137,7 +168,75 @@ const ProductionSiteEntry = mongoose.model("ProductionSiteEntry", ProductionSite
 app.get("/api/productionsite", async(req,res)=>res.json(await ProductionSiteEntry.find().sort({date:-1})));
 app.post("/api/productionsite", async(req,res)=>res.json(await ProductionSiteEntry.create(req.body)));
 app.put("/api/productionsite/:id", async(req,res)=>res.json(await ProductionSiteEntry.findByIdAndUpdate(req.params.id,req.body,{new:true})));
+// SITE PAYMENTS
+      );
+    }
 
+    res.json(payment);
+
+  }catch(e){
+
+    res.status(500).json({
+      message:e.message
+    });
+  }
+});
+
+
+app.delete('/api/sitepayments/:id', async(req,res)=>{
+
+  const payment = await SitePayment.findById(
+    req.params.id
+  );
+
+  if(payment){
+
+    await SitePayment.findByIdAndDelete(
+      req.params.id
+    );
+
+    const payments = await SitePayment.find({
+      siteId:payment.siteId
+    });
+
+    const totalReceived = payments.reduce(
+      (a,p)=>a+(+(p.amount)||0),0
+    );
+
+    const site = await SiteWork.findById(
+      payment.siteId
+    );
+
+    if(site){
+
+      const totalSiteAmount =
+        +(site.totalCost || site.totalAmount || 0);
+
+      const pending = Math.max(
+        0,
+        totalSiteAmount-totalReceived
+      );
+
+      let paymentStatus = "pending";
+
+      if(pending <= 0)
+        paymentStatus = "paid";
+      else if(totalReceived > 0)
+        paymentStatus = "partial";
+
+      await SiteWork.findByIdAndUpdate(
+        payment.siteId,
+        {
+          advancePaid:totalReceived,
+          pendingAmount:pending,
+          paymentStatus
+        }
+      );
+    }
+  }
+
+  res.json({ok:true});
+});
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, async()=>{
