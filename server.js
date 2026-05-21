@@ -25,6 +25,9 @@ const WorkerPaymentSchema = new mongoose.Schema({ workerName:String, amount:Numb
 const PurchaseSchema = new mongoose.Schema({ date:String, supplierName:String, supplierPhone:String, supplierAddress:String, itemName:String, itemType:String, quantity:String, unit:String, unitPrice:String, totalAmount:Number, paymentMode:String, vehicleNumber:String, vehicleType:String, driverName:String, driverPhone:String, deliveryAddress:String, note:String, addedBy:String }, {timestamps:true});
 const MasterDataSchema = new mongoose.Schema({ name:String, category:String, shape:String, color:String, size:String, thickness:String, pricePerSqft:Number, pricePerSqm:Number, unit:String, price:Number, stock:Number, rate:Number, rateType:String, description:String, notes:String, addedBy:String }, {timestamps:true});
 
+
+
+
 const User = mongoose.model('User', UserSchema);
 const Stock = mongoose.model('Stock', StockSchema);
 const RawMaterial = mongoose.model('RawMaterial', RawMaterialSchema);
