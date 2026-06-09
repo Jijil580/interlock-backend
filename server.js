@@ -16,14 +16,15 @@ const StockSchema = new mongoose.Schema({ name:String, unit:String, quantity:Num
 const RawMaterialSchema = new mongoose.Schema({ name:String, material:String, supplier:String, unit:String, quantity:Number, qty:Number, price:Number, costPerUnit:Number, lastPurchase:String, company:String }, {timestamps:true});
 const ProductionSchema = new mongoose.Schema({ date:String, product:String, shift:String, target:Number, produced:Number, machine:String, supervisor:String, status:{type:String,default:'pending'}, notes:String, note:String, company:String }, {timestamps:true});
 const SalesSchema = new mongoose.Schema({ date:String, customer:String, mobileNumber:String, address:String, product:String, interlockDetails:String, quantity:Number, unit:String, price:Number, unitPrice:Number, discount:{type:Number,default:0}, total:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, invoiceNumber:String, status:{type:String,default:'pending'}, addedBy:String, company:String }, {timestamps:true});
-const CustomerSchema = new mongoose.Schema({ mobile:{type:String,unique:true}, name:String, address:String, totalPurchases:{type:Number,default:0}, totalSalesAmount:{type:Number,default:0}, totalDiscount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, company:String }, {timestamps:true});
+const CustomerSchema = new mongoose.Schema({ mobile:{type:String,unique:true}, name:String, address:String, gstNumber:String, notes:String, totalPurchases:{type:Number,default:0}, totalSalesAmount:{type:Number,default:0}, totalDiscount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, totalQuantity:{type:Number,default:0}, company:String, addedBy:String }, {timestamps:true});
 const SiteWorkSchema = new mongoose.Schema({ customerName:String, phone:String, siteLocation:String, location:String, interlockType:String, interlockColor:String, selectedWorkers:[String], startDate:String, endDate:String, status:{type:String,default:'running'}, workUnit:String, workSize:String, ratePerUnit:String, baseWorkCost:String, extraWork:Array, extraMaterials:Array, materialCost:String, laborCost:String, totalCost:String, advancePaid:String, pendingAmount:String, paymentStatus:{type:String,default:'pending'}, paymentMode:String, note:String, addedBy:String, workStatus:String, totalAmount:Number, paidAmount:Number, company:String }, {timestamps:true});
 const WorkerReportSchema = new mongoose.Schema({ siteName:String, phoneNo:String, startingDate:String, workerName:String, totalArea:String, workingCost:String, extraWork:String, extraMaterial:String, totalWorkingArea:String, totalAmount:String, note:String, paymentMode:String, upiId:String, bankName:String, bankBranch:String, bankAccount:String, amountReceivedBy:String, materialSupply:String, materialType:String, signatures:{supervisor:Boolean,office:Boolean,admin:Boolean}, addedBy:String }, {timestamps:true});
 const DailyReportSchema = new mongoose.Schema({ date:String, siteName:String, siteId:String, siteStatus:String, workersCount:String, totalArea:String, completedToday:String, totalCompleted:String, interlockType:String, dayNotes:String, materialsUnloaded:String, materialQty:String, equipment:String, supplierName:String, materialRemarks:String, extraWorkDesc:String, extraWorkQty:String, extraWorkCost:String, extraWorkRemarks:String, payments:Array, totalPayments:Number, complaints:String, actionTaken:String, complaintRemarks:String, addedBy:String, newSite:String, runningSite:String, workersDetail:String, materialSupply:String, dayNote:String, expenses:String, workerPayments:[{workerName:String,amount:Number,date:String,note:String}] }, {timestamps:true});
 const WorkPlanSchema = new mongoose.Schema({ date:String, siteName:String, task:String, workers:String, materials:String, note:String, status:{type:String,default:'planned'}, fromDate:String, toDate:String, site:String, plannedWork:String, workersAllocated:String, materialsNeeded:String, estimatedCost:Number, paymentPlan:String, notes:String, addedBy:String }, {timestamps:true});
 const WorkerSchema = new mongoose.Schema({ name:String, phone:String, address:String, role:String, workerCategory:String, workLocationType:String, paymentType:String, customPaymentType:String, rateType:String, rateAmount:Number, addedBy:String }, {timestamps:true});
 const WorkerPaymentSchema = new mongoose.Schema({ workerName:String, amount:Number, date:String, note:String, addedBy:String, source:String, reportDate:String }, {timestamps:true});
-const PurchaseSchema = new mongoose.Schema({ date:String, supplierName:String, supplierPhone:String, supplierAddress:String, itemName:String, itemType:String, quantity:String, unit:String, unitPrice:String, totalAmount:Number, paymentMode:String, vehicleNumber:String, vehicleType:String, driverName:String, driverPhone:String, deliveryAddress:String, note:String, addedBy:String }, {timestamps:true});
+const PurchaseSchema = new mongoose.Schema({ date:String, supplierName:String, supplierPhone:String, supplierMobile:String, supplierAddress:String, itemName:String, itemType:String, quantity:String, unit:String, unitPrice:String, totalAmount:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, vehicleNumber:String, vehicleType:String, driverName:String, driverPhone:String, deliveryAddress:String, note:String, addedBy:String }, {timestamps:true});
+const SupplierSchema = new mongoose.Schema({ name:String, mobile:String, phone:String, address:String, location:String, materialType:String, materials:[String], customMaterial:String, gstNumber:String, notes:String, note:String, totalPurchases:{type:Number,default:0}, totalPurchaseAmount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
 const MasterDataSchema = new mongoose.Schema({ name:String, category:String, shape:String, color:String, size:String, thickness:String, pricePerSqft:Number, pricePerSqm:Number, unit:String, price:Number, stock:Number, rate:Number, rateType:String, description:String, notes:String, addedBy:String }, {timestamps:true});
 
 
@@ -40,37 +41,172 @@ function normalizeMobile(m) {
   return String(m || '').replace(/\D/g, '').slice(-10);
 }
 
-async function upsertCustomerFromSale(sale) {
+function buildItemSummary(records, nameField) {
+  const map = {};
+  records.forEach(r => {
+    const item = r[nameField] || 'Other';
+    if (!map[item]) map[item] = { item, quantity: 0, unit: r.unit || '' };
+    map[item].quantity += +(r.quantity) || 0;
+    if (r.unit) map[item].unit = r.unit;
+  });
+  return Object.values(map);
+}
+
+function summarizeSales(purchases, customer) {
+  const mobile = customer?.mobile || purchases[0]?.mobileNumber || '';
+  return {
+    name: customer?.name || purchases[0]?.customer || '',
+    mobile,
+    address: customer?.address || purchases[0]?.address || '',
+    gstNumber: customer?.gstNumber || '',
+    notes: customer?.notes || '',
+    totalPurchases: purchases.length,
+    totalSalesAmount: purchases.reduce((a, s) => a + (+(s.total) || 0), 0),
+    totalDiscount: purchases.reduce((a, s) => a + (+(s.discount) || 0), 0),
+    totalPaid: purchases.reduce((a, s) => a + (+(s.amountPaid) || 0), 0),
+    totalPending: purchases.reduce((a, s) => a + (+(s.amountPending) || 0), 0),
+    totalQuantity: purchases.reduce((a, s) => a + (+(s.quantity) || 0), 0),
+  };
+}
+
+async function buildCustomerLedger(mobile, dateFilter = {}) {
+  const customer = await Customer.findOne({ mobile });
+  const filter = { mobileNumber: mobile };
+  if (dateFilter.fromDate || dateFilter.toDate) {
+    filter.date = {};
+    if (dateFilter.fromDate) filter.date.$gte = dateFilter.fromDate;
+    if (dateFilter.toDate) filter.date.$lte = dateFilter.toDate;
+  }
+  const purchases = await Sales.find(filter).sort({ createdAt: -1 });
+  if (!customer && !purchases.length) return null;
+  return {
+    customer: summarizeSales(purchases, customer),
+    itemSummary: buildItemSummary(purchases, 'product'),
+    purchases,
+  };
+}
+
+function summarizePurchases(records, supplier) {
+  const mobile = supplier?.mobile || supplier?.phone || records[0]?.supplierMobile || records[0]?.supplierPhone || '';
+  return {
+    name: supplier?.name || records[0]?.supplierName || '',
+    mobile,
+    address: supplier?.address || supplier?.location || records[0]?.supplierAddress || '',
+    gstNumber: supplier?.gstNumber || '',
+    materialType: supplier?.materialType || '',
+    totalPurchases: records.length,
+    totalPurchaseAmount: records.reduce((a, p) => a + (+(p.totalAmount) || 0), 0),
+    totalPaid: records.reduce((a, p) => a + (+(p.amountPaid) || 0), 0),
+    totalPending: records.reduce((a, p) => a + (+(p.amountPending) || 0), 0),
+  };
+}
+
+async function buildSupplierLedger({ mobile, name, dateFilter = {} }) {
+  const filter = {};
+  if (mobile) {
+    const m = normalizeMobile(mobile);
+    filter.$or = [{ supplierMobile: m }, { supplierPhone: m }];
+  } else if (name) {
+    filter.supplierName = { $regex: name, $options: 'i' };
+  } else return null;
+  if (dateFilter.fromDate || dateFilter.toDate) {
+    filter.date = {};
+    if (dateFilter.fromDate) filter.date.$gte = dateFilter.fromDate;
+    if (dateFilter.toDate) filter.date.$lte = dateFilter.toDate;
+  }
+  const purchases = await Purchase.find(filter).sort({ createdAt: -1 });
+  if (!purchases.length) return null;
+  const m = mobile ? normalizeMobile(mobile) : normalizeMobile(purchases[0].supplierMobile || purchases[0].supplierPhone);
+  let supplier = m ? await Supplier.findOne({ $or: [{ mobile: m }, { phone: m }] }) : null;
+  if (!supplier && name) supplier = await Supplier.findOne({ name: { $regex: `^${name}$`, $options: 'i' } });
+  return {
+    supplier: summarizePurchases(purchases, supplier),
+    materialSummary: buildItemSummary(purchases, 'itemName'),
+    purchases,
+  };
+}
+
+async function upsertCustomerFromSale(sale, saveToMaster = true) {
+  if (!saveToMaster) return null;
   const mobile = normalizeMobile(sale.mobileNumber);
   if (!mobile || mobile.length < 10) return null;
   const paid = +(sale.amountPaid) || 0;
   const pending = +(sale.amountPending) || 0;
   const total = +(sale.total) || 0;
   const discount = +(sale.discount) || 0;
+  const qty = +(sale.quantity) || 0;
   let customer = await Customer.findOne({ mobile });
   if (!customer) {
     customer = await Customer.create({
       mobile,
       name: sale.customer || '',
       address: sale.address || '',
+      gstNumber: sale.gstNumber || '',
+      notes: sale.customerNotes || '',
       totalPurchases: 1,
       totalSalesAmount: total,
       totalDiscount: discount,
       totalPaid: paid,
       totalPending: pending,
+      totalQuantity: qty,
       company: sale.company || 'default',
+      addedBy: sale.addedBy || '',
     });
   } else {
     if (sale.customer) customer.name = sale.customer;
     if (sale.address) customer.address = sale.address;
+    if (sale.gstNumber) customer.gstNumber = sale.gstNumber;
     customer.totalPurchases += 1;
     customer.totalSalesAmount += total;
     customer.totalDiscount += discount;
     customer.totalPaid += paid;
     customer.totalPending += pending;
+    customer.totalQuantity += qty;
     await customer.save();
   }
   return customer;
+}
+
+async function upsertSupplierFromPurchase(purchase, saveToMaster = true) {
+  if (!saveToMaster) return null;
+  const mobile = normalizeMobile(purchase.supplierMobile || purchase.supplierPhone);
+  const name = purchase.supplierName;
+  if (!name) return null;
+  const paid = +(purchase.amountPaid) || 0;
+  const pending = +(purchase.amountPending) || 0;
+  const total = +(purchase.totalAmount) || 0;
+  let supplier = null;
+  if (mobile) supplier = await Supplier.findOne({ $or: [{ mobile }, { phone: mobile }] });
+  if (!supplier) supplier = await Supplier.findOne({ name: { $regex: `^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i' } });
+  if (!supplier) {
+    supplier = await Supplier.create({
+      name,
+      mobile: mobile || '',
+      phone: mobile || '',
+      address: purchase.supplierAddress || '',
+      location: purchase.supplierAddress || '',
+      materialType: purchase.itemName || '',
+      materials: purchase.itemName ? [purchase.itemName] : [],
+      totalPurchases: 1,
+      totalPurchaseAmount: total,
+      totalPaid: paid,
+      totalPending: pending,
+      addedBy: purchase.addedBy || '',
+    });
+  } else {
+    if (purchase.supplierAddress) { supplier.address = purchase.supplierAddress; supplier.location = purchase.supplierAddress; }
+    if (mobile) { supplier.mobile = mobile; supplier.phone = mobile; }
+    supplier.totalPurchases += 1;
+    supplier.totalPurchaseAmount += total;
+    supplier.totalPaid += paid;
+    supplier.totalPending += pending;
+    if (purchase.itemName) {
+      const mats = supplier.materials || [];
+      if (!mats.includes(purchase.itemName)) supplier.materials = [...mats, purchase.itemName];
+    }
+    await supplier.save();
+  }
+  return supplier;
 }
 const SiteWork = mongoose.model('SiteWork', SiteWorkSchema);
 const WorkerReport = mongoose.model('WorkerReport', WorkerReportSchema);
@@ -79,6 +215,7 @@ const WorkPlan = mongoose.model('WorkPlan', WorkPlanSchema);
 const Worker = mongoose.model('Worker', WorkerSchema);
 const WorkerPayment = mongoose.model('WorkerPayment', WorkerPaymentSchema);
 const Purchase = mongoose.model('Purchase', PurchaseSchema);
+const Supplier = mongoose.model('Supplier', SupplierSchema);
 const MasterInterlock = mongoose.model('MasterInterlock', MasterDataSchema);
 const MasterMaterial = mongoose.model('MasterMaterial', new mongoose.Schema({...MasterDataSchema.obj},{timestamps:true}));
 const MasterLabor = mongoose.model('MasterLabor', new mongoose.Schema({...MasterDataSchema.obj},{timestamps:true}));
@@ -149,39 +286,80 @@ app.post('/api/sales', async(req,res)=>{
     const amountPending = total - amountPaid;
     const status = amountPending <= 0 ? 'paid' : amountPaid > 0 ? 'partial' : 'pending';
     const sale = await Sales.create({ ...req.body, mobileNumber: mobile, total, discount, amountPaid, amountPending, status });
-    await upsertCustomerFromSale(sale);
+    await upsertCustomerFromSale(sale, req.body.saveToCustomerMaster !== false);
     res.json(sale);
   } catch(e) { res.status(400).json({ message: e.message }); }
 });
 app.put('/api/sales/:id', async(req,res)=>res.json(await Sales.findByIdAndUpdate(req.params.id,req.body,{new:true})));
 app.delete('/api/sales/:id', async(req,res)=>{await Sales.findByIdAndDelete(req.params.id);res.json({ok:true});});
 
+app.get('/api/customers', async(req,res)=>res.json(await Customer.find().sort({ name: 1 })));
+app.post('/api/customers', async(req,res)=>{
+  try {
+    const mobile = normalizeMobile(req.body.mobile);
+    if (!mobile || mobile.length < 10) return res.status(400).json({ message: 'Valid mobile number is required' });
+    if (!req.body.name) return res.status(400).json({ message: 'Customer name is required' });
+    res.json(await Customer.create({ ...req.body, mobile }));
+  } catch(e) { res.status(400).json({ message: e.message }); }
+});
+app.put('/api/customers/:id', async(req,res)=>{
+  try {
+    const data = { ...req.body };
+    if (data.mobile) data.mobile = normalizeMobile(data.mobile);
+    res.json(await Customer.findByIdAndUpdate(req.params.id, data, { new: true }));
+  } catch(e) { res.status(400).json({ message: e.message }); }
+});
+app.delete('/api/customers/:id', async(req,res)=>{ await Customer.findByIdAndDelete(req.params.id); res.json({ ok: true }); });
+
 app.get('/api/customers/mobile/:mobile', async(req,res)=>{
   try {
     const mobile = normalizeMobile(req.params.mobile);
     if (!mobile) return res.status(400).json({ message: 'Invalid mobile number' });
-    const customer = await Customer.findOne({ mobile });
-    const purchases = await Sales.find({ mobileNumber: mobile }).sort({ createdAt: -1 });
-    const summary = customer ? {
-      name: customer.name,
-      mobile: customer.mobile,
-      address: customer.address,
-      totalPurchases: customer.totalPurchases,
-      totalSalesAmount: customer.totalSalesAmount,
-      totalDiscount: customer.totalDiscount,
-      totalPaid: customer.totalPaid,
-      totalPending: customer.totalPending,
-    } : purchases.length ? {
-      name: purchases[0].customer || '',
-      mobile,
-      address: purchases[0].address || '',
-      totalPurchases: purchases.length,
-      totalSalesAmount: purchases.reduce((a,s)=>a+(+(s.total)||0),0),
-      totalDiscount: purchases.reduce((a,s)=>a+(+(s.discount)||0),0),
-      totalPaid: purchases.reduce((a,s)=>a+(+(s.amountPaid)||0),0),
-      totalPending: purchases.reduce((a,s)=>a+(+(s.amountPending)||0),0),
-    } : null;
-    res.json({ customer: summary, purchases });
+    const { fromDate, toDate } = req.query;
+    const ledger = await buildCustomerLedger(mobile, { fromDate, toDate });
+    if (!ledger) return res.json({ customer: null, purchases: [], itemSummary: [] });
+    res.json(ledger);
+  } catch(e) { res.status(500).json({ message: e.message }); }
+});
+
+app.get('/api/customers/search', async(req,res)=>{
+  try {
+    const { name, mobile, fromDate, toDate } = req.query;
+    if (mobile) {
+      const ledger = await buildCustomerLedger(normalizeMobile(mobile), { fromDate, toDate });
+      return res.json(ledger || { customer: null, purchases: [], itemSummary: [] });
+    }
+    if (name) {
+      const customers = await Customer.find({ name: { $regex: name, $options: 'i' } });
+      if (customers.length === 1) {
+        const ledger = await buildCustomerLedger(customers[0].mobile, { fromDate, toDate });
+        return res.json(ledger);
+      }
+      return res.json({ customers: customers.map(c => ({ _id: c._id, name: c.name, mobile: c.mobile, totalPending: c.totalPending })) });
+    }
+    res.json({ customers: await Customer.find().sort({ name: 1 }) });
+  } catch(e) { res.status(500).json({ message: e.message }); }
+});
+
+app.get('/api/customers/reports', async(req,res)=>{
+  try {
+    const { type } = req.query;
+    const customers = await Customer.find().sort({ name: 1 });
+    const allSales = await Sales.find();
+    const itemMap = {};
+    allSales.forEach(s => {
+      const key = s.product || 'Other';
+      if (!itemMap[key]) itemMap[key] = { item: key, quantity: 0, unit: s.unit || '', amount: 0 };
+      itemMap[key].quantity += +(s.quantity) || 0;
+      itemMap[key].amount += +(s.total) || 0;
+    });
+    let list = customers.map(c => ({
+      _id: c._id, name: c.name, mobile: c.mobile,
+      totalSalesAmount: c.totalSalesAmount, totalPaid: c.totalPaid, totalPending: c.totalPending,
+    }));
+    if (type === 'pending') list = list.filter(c => (+(c.totalPending) || 0) > 0);
+    if (type === 'paid') list = list.filter(c => (+(c.totalPending) || 0) <= 0 && (+(c.totalSalesAmount) || 0) > 0);
+    res.json({ customers: list, itemWise: Object.values(itemMap) });
   } catch(e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -210,8 +388,43 @@ app.delete('/api/workers/:id', async(req,res)=>{await Worker.findByIdAndDelete(r
 app.get('/api/workerpayments', async(req,res)=>res.json(await WorkerPayment.find().sort({date:-1})));
 app.post('/api/workerpayments', async(req,res)=>res.json(await WorkerPayment.create(req.body)));
 
-app.get('/api/purchases', async(req,res)=>res.json(await Purchase.find().sort({createdAt:-1})));
-app.post('/api/purchases', async(req,res)=>res.json(await Purchase.create(req.body)));
+app.get('/api/purchases', async(req,res)=>{
+  try {
+    const { mobile, supplier, date, fromDate, toDate } = req.query;
+    const filter = {};
+    if (mobile) {
+      const m = normalizeMobile(mobile);
+      filter.$or = [{ supplierMobile: m }, { supplierPhone: m }];
+    }
+    if (supplier) filter.supplierName = { $regex: supplier, $options: 'i' };
+    if (date) filter.date = date;
+    if (fromDate || toDate) {
+      filter.date = {};
+      if (fromDate) filter.date.$gte = fromDate;
+      if (toDate) filter.date.$lte = toDate;
+    }
+    res.json(await Purchase.find(filter).sort({ createdAt: -1 }));
+  } catch(e) { res.status(500).json({ message: e.message }); }
+});
+app.post('/api/purchases', async(req,res)=>{
+  try {
+    if (!req.body.supplierName) return res.status(400).json({ message: 'Supplier name is required' });
+    const mobile = normalizeMobile(req.body.supplierMobile || req.body.supplierPhone);
+    const total = +(req.body.totalAmount) || 0;
+    const amountPaid = +(req.body.amountPaid) || 0;
+    const amountPending = Math.max(0, total - amountPaid);
+    const purchase = await Purchase.create({
+      ...req.body,
+      supplierMobile: mobile,
+      supplierPhone: mobile || req.body.supplierPhone,
+      totalAmount: total,
+      amountPaid,
+      amountPending,
+    });
+    await upsertSupplierFromPurchase(purchase, req.body.saveToSupplierMaster !== false);
+    res.json(purchase);
+  } catch(e) { res.status(400).json({ message: e.message }); }
+});
 
 const masterModels = {interlock:MasterInterlock,materials:MasterMaterial,labor:MasterLabor,extrawork:MasterExtraWork};
 ['interlock','materials','labor','extrawork'].forEach(type=>{
@@ -222,13 +435,59 @@ const masterModels = {interlock:MasterInterlock,materials:MasterMaterial,labor:M
   app.delete(`/api/masterdata/${type}/:id`, async(req,res)=>{await Model.findByIdAndDelete(req.params.id);res.json({ok:true});});
 });
 
-// Suppliers
-const SupplierSchema = new mongoose.Schema({ name:String, location:String, phone:String, materials:[String], customMaterial:String, note:String, addedBy:String }, {timestamps:true});
-const Supplier = mongoose.model("Supplier", SupplierSchema);
 app.get("/api/suppliers", async(req,res)=>res.json(await Supplier.find().sort({name:1})));
-app.post("/api/suppliers", async(req,res)=>res.json(await Supplier.create(req.body)));
-app.put("/api/suppliers/:id", async(req,res)=>res.json(await Supplier.findByIdAndUpdate(req.params.id,req.body,{new:true})));
+app.post("/api/suppliers", async(req,res)=>{
+  try {
+    const data = { ...req.body };
+    if (data.mobile || data.phone) {
+      const m = normalizeMobile(data.mobile || data.phone);
+      data.mobile = m; data.phone = m;
+    }
+    if (data.address && !data.location) data.location = data.address;
+    res.json(await Supplier.create(data));
+  } catch(e) { res.status(400).json({ message: e.message }); }
+});
+app.put("/api/suppliers/:id", async(req,res)=>{
+  const data = { ...req.body };
+  if (data.mobile || data.phone) {
+    const m = normalizeMobile(data.mobile || data.phone);
+    data.mobile = m; data.phone = m;
+  }
+  if (data.address) data.location = data.address;
+  res.json(await Supplier.findByIdAndUpdate(req.params.id, data, { new: true }));
+});
 app.delete("/api/suppliers/:id", async(req,res)=>{await Supplier.findByIdAndDelete(req.params.id);res.json({ok:true});});
+
+app.get('/api/suppliers/ledger', async(req,res)=>{
+  try {
+    const { mobile, name, fromDate, toDate } = req.query;
+    const ledger = await buildSupplierLedger({ mobile, name, dateFilter: { fromDate, toDate } });
+    if (!ledger) return res.json({ supplier: null, purchases: [], materialSummary: [] });
+    res.json(ledger);
+  } catch(e) { res.status(500).json({ message: e.message }); }
+});
+
+app.get('/api/suppliers/reports', async(req,res)=>{
+  try {
+    const { type } = req.query;
+    const suppliers = await Supplier.find().sort({ name: 1 });
+    const allPurchases = await Purchase.find();
+    const materialMap = {};
+    allPurchases.forEach(p => {
+      const key = p.itemName || 'Other';
+      if (!materialMap[key]) materialMap[key] = { material: key, quantity: 0, unit: p.unit || '', amount: 0 };
+      materialMap[key].quantity += +(p.quantity) || 0;
+      materialMap[key].amount += +(p.totalAmount) || 0;
+    });
+    let list = suppliers.map(s => ({
+      _id: s._id, name: s.name, mobile: s.mobile || s.phone,
+      totalPurchaseAmount: s.totalPurchaseAmount, totalPaid: s.totalPaid, totalPending: s.totalPending,
+    }));
+    if (type === 'pending') list = list.filter(s => (+(s.totalPending) || 0) > 0);
+    if (type === 'paid') list = list.filter(s => (+(s.totalPending) || 0) <= 0 && (+(s.totalPurchaseAmount) || 0) > 0);
+    res.json({ suppliers: list, materialWise: Object.values(materialMap) });
+  } catch(e) { res.status(500).json({ message: e.message }); }
+});
 
 // Production Site
 const ProductionSiteSchema = new mongoose.Schema({ date:String, workType:String, notes:String, attendance:Array, totalCost:Number, addedBy:String }, {timestamps:true});
