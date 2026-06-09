@@ -15,7 +15,8 @@ const UserSchema = new mongoose.Schema({ name:String, username:{type:String,uniq
 const StockSchema = new mongoose.Schema({ name:String, unit:String, quantity:Number, minStock:Number, price:Number, company:String }, {timestamps:true});
 const RawMaterialSchema = new mongoose.Schema({ name:String, material:String, supplier:String, unit:String, quantity:Number, qty:Number, price:Number, costPerUnit:Number, lastPurchase:String, company:String }, {timestamps:true});
 const ProductionSchema = new mongoose.Schema({ date:String, product:String, shift:String, target:Number, produced:Number, machine:String, supervisor:String, status:{type:String,default:'pending'}, notes:String, note:String, company:String }, {timestamps:true});
-const SalesSchema = new mongoose.Schema({ date:String, customer:String, product:String, quantity:Number, price:Number, unitPrice:Number, total:Number, paymentMode:String, status:{type:String,default:'pending'}, addedBy:String, company:String }, {timestamps:true});
+const SalesSchema = new mongoose.Schema({ date:String, customer:String, mobileNumber:String, address:String, product:String, interlockDetails:String, quantity:Number, unit:String, price:Number, unitPrice:Number, discount:{type:Number,default:0}, total:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, invoiceNumber:String, status:{type:String,default:'pending'}, addedBy:String, company:String }, {timestamps:true});
+const CustomerSchema = new mongoose.Schema({ mobile:{type:String,unique:true}, name:String, address:String, totalPurchases:{type:Number,default:0}, totalSalesAmount:{type:Number,default:0}, totalDiscount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, company:String }, {timestamps:true});
 const SiteWorkSchema = new mongoose.Schema({ customerName:String, phone:String, siteLocation:String, location:String, interlockType:String, interlockColor:String, selectedWorkers:[String], startDate:String, endDate:String, status:{type:String,default:'running'}, workUnit:String, workSize:String, ratePerUnit:String, baseWorkCost:String, extraWork:Array, extraMaterials:Array, materialCost:String, laborCost:String, totalCost:String, advancePaid:String, pendingAmount:String, paymentStatus:{type:String,default:'pending'}, paymentMode:String, note:String, addedBy:String, workStatus:String, totalAmount:Number, paidAmount:Number, company:String }, {timestamps:true});
 const WorkerReportSchema = new mongoose.Schema({ siteName:String, phoneNo:String, startingDate:String, workerName:String, totalArea:String, workingCost:String, extraWork:String, extraMaterial:String, totalWorkingArea:String, totalAmount:String, note:String, paymentMode:String, upiId:String, bankName:String, bankBranch:String, bankAccount:String, amountReceivedBy:String, materialSupply:String, materialType:String, signatures:{supervisor:Boolean,office:Boolean,admin:Boolean}, addedBy:String }, {timestamps:true});
 const DailyReportSchema = new mongoose.Schema({ date:String, siteName:String, siteId:String, siteStatus:String, workersCount:String, totalArea:String, completedToday:String, totalCompleted:String, interlockType:String, dayNotes:String, materialsUnloaded:String, materialQty:String, equipment:String, supplierName:String, materialRemarks:String, extraWorkDesc:String, extraWorkQty:String, extraWorkCost:String, extraWorkRemarks:String, payments:Array, totalPayments:Number, complaints:String, actionTaken:String, complaintRemarks:String, addedBy:String, newSite:String, runningSite:String, workersDetail:String, materialSupply:String, dayNote:String, expenses:String, workerPayments:[{workerName:String,amount:Number,date:String,note:String}] }, {timestamps:true});
@@ -33,6 +34,44 @@ const Stock = mongoose.model('Stock', StockSchema);
 const RawMaterial = mongoose.model('RawMaterial', RawMaterialSchema);
 const Production = mongoose.model('Production', ProductionSchema);
 const Sales = mongoose.model('Sales', SalesSchema);
+const Customer = mongoose.model('Customer', CustomerSchema);
+
+function normalizeMobile(m) {
+  return String(m || '').replace(/\D/g, '').slice(-10);
+}
+
+async function upsertCustomerFromSale(sale) {
+  const mobile = normalizeMobile(sale.mobileNumber);
+  if (!mobile || mobile.length < 10) return null;
+  const paid = +(sale.amountPaid) || 0;
+  const pending = +(sale.amountPending) || 0;
+  const total = +(sale.total) || 0;
+  const discount = +(sale.discount) || 0;
+  let customer = await Customer.findOne({ mobile });
+  if (!customer) {
+    customer = await Customer.create({
+      mobile,
+      name: sale.customer || '',
+      address: sale.address || '',
+      totalPurchases: 1,
+      totalSalesAmount: total,
+      totalDiscount: discount,
+      totalPaid: paid,
+      totalPending: pending,
+      company: sale.company || 'default',
+    });
+  } else {
+    if (sale.customer) customer.name = sale.customer;
+    if (sale.address) customer.address = sale.address;
+    customer.totalPurchases += 1;
+    customer.totalSalesAmount += total;
+    customer.totalDiscount += discount;
+    customer.totalPaid += paid;
+    customer.totalPending += pending;
+    await customer.save();
+  }
+  return customer;
+}
 const SiteWork = mongoose.model('SiteWork', SiteWorkSchema);
 const WorkerReport = mongoose.model('WorkerReport', WorkerReportSchema);
 const DailyReport = mongoose.model('DailyReport', DailyReportSchema);
@@ -84,10 +123,67 @@ app.post('/api/production', async(req,res)=>res.json(await Production.create(req
 app.put('/api/production/:id', async(req,res)=>res.json(await Production.findByIdAndUpdate(req.params.id,req.body,{new:true})));
 app.delete('/api/production/:id', async(req,res)=>{await Production.findByIdAndDelete(req.params.id);res.json({ok:true});});
 
-app.get('/api/sales', async(req,res)=>res.json(await Sales.find().sort({createdAt:-1})));
-app.post('/api/sales', async(req,res)=>res.json(await Sales.create(req.body)));
+app.get('/api/sales', async(req,res)=>{
+  try {
+    const { mobile, customer, date, fromDate, toDate, invoice } = req.query;
+    const filter = {};
+    if (mobile) filter.mobileNumber = normalizeMobile(mobile);
+    if (customer) filter.customer = { $regex: customer, $options: 'i' };
+    if (invoice) filter.invoiceNumber = { $regex: invoice, $options: 'i' };
+    if (date) filter.date = date;
+    if (fromDate || toDate) {
+      filter.date = {};
+      if (fromDate) filter.date.$gte = fromDate;
+      if (toDate) filter.date.$lte = toDate;
+    }
+    res.json(await Sales.find(filter).sort({createdAt:-1}));
+  } catch(e) { res.status(500).json({ message: e.message }); }
+});
+app.post('/api/sales', async(req,res)=>{
+  try {
+    const mobile = normalizeMobile(req.body.mobileNumber);
+    if (!mobile || mobile.length < 10) return res.status(400).json({ message: 'Valid mobile number is required' });
+    const total = +(req.body.total) || 0;
+    const discount = +(req.body.discount) || 0;
+    const amountPaid = +(req.body.amountPaid) || 0;
+    const amountPending = total - amountPaid;
+    const status = amountPending <= 0 ? 'paid' : amountPaid > 0 ? 'partial' : 'pending';
+    const sale = await Sales.create({ ...req.body, mobileNumber: mobile, total, discount, amountPaid, amountPending, status });
+    await upsertCustomerFromSale(sale);
+    res.json(sale);
+  } catch(e) { res.status(400).json({ message: e.message }); }
+});
 app.put('/api/sales/:id', async(req,res)=>res.json(await Sales.findByIdAndUpdate(req.params.id,req.body,{new:true})));
 app.delete('/api/sales/:id', async(req,res)=>{await Sales.findByIdAndDelete(req.params.id);res.json({ok:true});});
+
+app.get('/api/customers/mobile/:mobile', async(req,res)=>{
+  try {
+    const mobile = normalizeMobile(req.params.mobile);
+    if (!mobile) return res.status(400).json({ message: 'Invalid mobile number' });
+    const customer = await Customer.findOne({ mobile });
+    const purchases = await Sales.find({ mobileNumber: mobile }).sort({ createdAt: -1 });
+    const summary = customer ? {
+      name: customer.name,
+      mobile: customer.mobile,
+      address: customer.address,
+      totalPurchases: customer.totalPurchases,
+      totalSalesAmount: customer.totalSalesAmount,
+      totalDiscount: customer.totalDiscount,
+      totalPaid: customer.totalPaid,
+      totalPending: customer.totalPending,
+    } : purchases.length ? {
+      name: purchases[0].customer || '',
+      mobile,
+      address: purchases[0].address || '',
+      totalPurchases: purchases.length,
+      totalSalesAmount: purchases.reduce((a,s)=>a+(+(s.total)||0),0),
+      totalDiscount: purchases.reduce((a,s)=>a+(+(s.discount)||0),0),
+      totalPaid: purchases.reduce((a,s)=>a+(+(s.amountPaid)||0),0),
+      totalPending: purchases.reduce((a,s)=>a+(+(s.amountPending)||0),0),
+    } : null;
+    res.json({ customer: summary, purchases });
+  } catch(e) { res.status(500).json({ message: e.message }); }
+});
 
 app.get('/api/sitework', async(req,res)=>res.json(await SiteWork.find().sort({createdAt:-1})));
 app.post('/api/sitework', async(req,res)=>res.json(await SiteWork.create(req.body)));
