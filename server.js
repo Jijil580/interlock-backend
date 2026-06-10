@@ -19,7 +19,7 @@ const SalesSchema = new mongoose.Schema({ date:String, customer:String, mobileNu
 const CustomerSchema = new mongoose.Schema({ mobile:{type:String,unique:true}, name:String, address:String, gstNumber:String, notes:String, totalPurchases:{type:Number,default:0}, totalSalesAmount:{type:Number,default:0}, totalDiscount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, totalQuantity:{type:Number,default:0}, company:String, addedBy:String }, {timestamps:true});
 const SiteWorkSchema = new mongoose.Schema({ customerName:String, phone:String, siteLocation:String, location:String, interlockType:String, interlockColor:String, selectedWorkers:[String], startDate:String, endDate:String, status:{type:String,default:'running'}, workUnit:String, workSize:String, ratePerUnit:String, baseWorkCost:String, extraWork:Array, extraMaterials:Array, materialCost:String, laborCost:String, totalCost:String, advancePaid:String, pendingAmount:String, paymentStatus:{type:String,default:'pending'}, paymentMode:String, note:String, addedBy:String, workStatus:String, totalAmount:Number, paidAmount:Number, company:String }, {timestamps:true});
 const WorkerReportSchema = new mongoose.Schema({ siteName:String, phoneNo:String, startingDate:String, workerName:String, totalArea:String, workingCost:String, extraWork:String, extraMaterial:String, totalWorkingArea:String, totalAmount:String, note:String, paymentMode:String, upiId:String, bankName:String, bankBranch:String, bankAccount:String, amountReceivedBy:String, materialSupply:String, materialType:String, signatures:{supervisor:Boolean,office:Boolean,admin:Boolean}, addedBy:String }, {timestamps:true});
-const DailyReportSchema = new mongoose.Schema({ date:String, siteName:String, siteId:String, siteStatus:String, workersCount:String, totalArea:String, completedToday:String, totalCompleted:String, interlockType:String, dayNotes:String, materialsUnloaded:String, materialQty:String, equipment:String, supplierName:String, materialRemarks:String, extraWorkDesc:String, extraWorkQty:String, extraWorkCost:String, extraWorkRemarks:String, payments:Array, totalPayments:Number, complaints:String, actionTaken:String, complaintRemarks:String, addedBy:String, newSite:String, runningSite:String, workersDetail:String, materialSupply:String, dayNote:String, expenses:String, workerPayments:[{workerName:String,amount:Number,date:String,note:String}] }, {timestamps:true});
+const DailyReportSchema = new mongoose.Schema({ date:String, siteName:String, siteId:String, siteStatus:String, workersCount:String, totalArea:String, completedToday:String, totalCompleted:String, interlockType:String, dayNotes:String, materialsUnloaded:String, materialQty:String, equipment:String, supplierName:String, materialRemarks:String, extraWorkDesc:String, extraWorkQty:String, extraWorkCost:String, extraWorkRemarks:String, workerEntries:[{workerName:String,attendance:String,dutyArea:String,workDone:String,salary:Number,amountEarned:Number,paymentGiven:Number,pending:Number,remarks:String}], payments:Array, totalPayments:Number, totalReceived:Number, complaints:String, actionTaken:String, complaintRemarks:String, addedBy:String, newSite:String, runningSite:String, workersDetail:String, materialSupply:String, dayNote:String, expenses:String, workerPayments:[{workerName:String,amount:Number,date:String,note:String}] }, {timestamps:true});
 const WorkPlanSchema = new mongoose.Schema({ date:String, siteName:String, task:String, workers:String, materials:String, note:String, status:{type:String,default:'planned'}, fromDate:String, toDate:String, site:String, plannedWork:String, workersAllocated:String, materialsNeeded:String, estimatedCost:Number, paymentPlan:String, notes:String, addedBy:String }, {timestamps:true});
 const WorkerSchema = new mongoose.Schema({ name:String, phone:String, address:String, role:String, workerCategory:String, workLocationType:String, paymentType:String, customPaymentType:String, rateType:String, rateAmount:Number, totalProduction:{type:Number,default:0}, totalEarnings:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
 const WorkerPaymentSchema = new mongoose.Schema({ workerName:String, amount:Number, date:String, note:String, addedBy:String, source:String, reportDate:String }, {timestamps:true});
@@ -427,18 +427,23 @@ async function recordWorkerPayment(workerName, amount, date, source, addedBy, no
   return payment;
 }
 
-async function buildWorkerLedger(workerName, dateFilter = {}) {
-  const worker = await Worker.findOne({ name: workerName });
-  const prodFilter = { workerName, producedQty: { $exists: true, $gt: 0 } };
-  const payFilter = { workerName };
+function applyDateFilter(filter, dateFilter, field = 'date') {
+  if (dateFilter.date) filter[field] = dateFilter.date;
   if (dateFilter.fromDate || dateFilter.toDate) {
-    prodFilter.date = {};
-    payFilter.date = {};
-    if (dateFilter.fromDate) { prodFilter.date.$gte = dateFilter.fromDate; payFilter.date.$gte = dateFilter.fromDate; }
-    if (dateFilter.toDate) { prodFilter.date.$lte = dateFilter.toDate; payFilter.date.$lte = dateFilter.toDate; }
+    filter[field] = {};
+    if (dateFilter.fromDate) filter[field].$gte = dateFilter.fromDate;
+    if (dateFilter.toDate) filter[field].$lte = dateFilter.toDate;
   }
-  const productions = await ProductionSiteEntry.find(prodFilter).sort({ createdAt: -1 });
-  const payments = await WorkerPayment.find(payFilter).sort({ createdAt: -1 });
+}
+
+async function buildProductionWorkerReport(workerName, filters = {}) {
+  const worker = await Worker.findOne({ name: workerName });
+  const prodFilter = { workerName, producedQty: { $gt: 0 } };
+  applyDateFilter(prodFilter, filters);
+  if (filters.item) prodFilter.itemName = { $regex: filters.item, $options: 'i' };
+  if (filters.color) prodFilter.color = { $regex: filters.color, $options: 'i' };
+
+  const productions = await ProductionSiteEntry.find(prodFilter).sort({ date: -1, createdAt: -1 });
   const itemMap = {};
   productions.forEach(p => {
     const key = p.itemName || 'Other';
@@ -446,23 +451,129 @@ async function buildWorkerLedger(workerName, dateFilter = {}) {
     itemMap[key].quantity += +(p.producedQty) || 0;
     if (p.unit) itemMap[key].unit = p.unit;
   });
-  const totalProduction = productions.reduce((a, p) => a + (+(p.producedQty) || 0), 0);
+
+  const totalQuantity = productions.reduce((a, p) => a + (+(p.producedQty) || 0), 0);
   const totalEarnings = productions.reduce((a, p) => a + (+(p.totalAmount) || 0), 0);
-  const totalPaid = payments.reduce((a, p) => a + (+(p.amount) || 0), 0);
+  const totalPaid = productions.reduce((a, p) => a + (+(p.paymentGiven) || 0), 0);
+
   return {
+    type: 'production',
     worker: {
       name: workerName,
       role: worker?.role || '',
       phone: worker?.phone || '',
-      totalProduction,
+      totalQuantity,
       totalEarnings,
       totalPaid,
       totalPending: Math.max(0, totalEarnings - totalPaid),
     },
     itemSummary: Object.values(itemMap),
+    history: productions.map(p => ({
+      _id: p._id, date: p.date, item: p.itemName, color: p.color || '',
+      qty: p.producedQty, unit: p.unit || p.unitType || '',
+      rate: p.productionRate, amount: p.totalAmount, paid: +(p.paymentGiven) || 0,
+      pending: Math.max(0, (+(p.totalAmount) || 0) - (+(p.paymentGiven) || 0)),
+    })),
     productions,
-    payments,
   };
+}
+
+async function buildSiteWorkerReport(workerName, filters = {}) {
+  const worker = await Worker.findOne({ name: workerName });
+  const reportFilter = {};
+  applyDateFilter(reportFilter, filters);
+  const reports = await DailyReport.find(reportFilter).sort({ date: -1 });
+
+  const history = [];
+  const siteMap = {};
+
+  reports.forEach(r => {
+    if (filters.site && !(r.siteName || '').toLowerCase().includes(filters.site.toLowerCase())) return;
+
+    (r.workerEntries || []).forEach(we => {
+      if (we.workerName !== workerName) return;
+      const earned = +(we.salary || we.amountEarned || 0);
+      const paid = +(we.paymentGiven || 0);
+      const row = {
+        date: r.date, siteName: r.siteName, dutyArea: we.dutyArea || '',
+        workDone: we.workDone || '', amountEarned: earned, paymentGiven: paid,
+        balance: Math.max(0, earned - paid), attendance: we.attendance, remarks: we.remarks,
+      };
+      history.push(row);
+
+      const sk = r.siteName || 'Unknown';
+      if (!siteMap[sk]) siteMap[sk] = { siteName: sk, dutyAreas: new Set(), workDone: [], totalEarned: 0, totalPaid: 0, entries: [] };
+      if (we.dutyArea) siteMap[sk].dutyAreas.add(we.dutyArea);
+      if (we.workDone) siteMap[sk].workDone.push(we.workDone);
+      siteMap[sk].totalEarned += earned;
+      siteMap[sk].totalPaid += paid;
+      siteMap[sk].entries.push(row);
+    });
+
+    (r.payments || []).filter(p => p.type === 'Worker Payment' && p.workerName === workerName).forEach(p => {
+      const paid = +(p.amount || 0);
+      const row = {
+        date: r.date, siteName: r.siteName, dutyArea: '—', workDone: 'Additional Payment',
+        amountEarned: 0, paymentGiven: paid, balance: 0, isExtraPayment: true,
+      };
+      history.push(row);
+      const sk = r.siteName || 'Unknown';
+      if (!siteMap[sk]) siteMap[sk] = { siteName: sk, dutyAreas: new Set(), workDone: [], totalEarned: 0, totalPaid: 0, entries: [] };
+      siteMap[sk].totalPaid += paid;
+      siteMap[sk].entries.push(row);
+    });
+  });
+
+  history.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  const workRows = history.filter(h => !h.isExtraPayment);
+  const totalSites = new Set(workRows.map(h => h.siteName)).size;
+  const totalEarnings = workRows.reduce((a, h) => a + h.amountEarned, 0);
+  const totalPaid = history.reduce((a, h) => a + h.paymentGiven, 0);
+
+  const sites = Object.values(siteMap).map(s => ({
+    siteName: s.siteName,
+    dutyArea: [...s.dutyAreas].join(', ') || (s.entries[0]?.dutyArea || '—'),
+    workCompleted: [...new Set(s.workDone)].join(', ') || '—',
+    totalEarned: s.totalEarned,
+    totalPaid: s.totalPaid,
+    pending: Math.max(0, s.totalEarned - s.totalPaid),
+    entries: s.entries,
+  }));
+
+  return {
+    type: 'site',
+    worker: {
+      name: workerName,
+      role: worker?.role || '',
+      phone: worker?.phone || '',
+      totalSites,
+      totalEarnings,
+      totalPaid,
+      totalPending: Math.max(0, totalEarnings - totalPaid),
+    },
+    sites,
+    history,
+  };
+}
+
+async function buildOverallWorkerAccount(workerName, filters = {}) {
+  const production = await buildProductionWorkerReport(workerName, filters);
+  const site = await buildSiteWorkerReport(workerName, filters);
+  return {
+    type: 'overall',
+    worker: { name: workerName },
+    production: production.worker,
+    site: site.worker,
+    grandTotal: {
+      totalEarnings: production.worker.totalEarnings + site.worker.totalEarnings,
+      totalPaid: production.worker.totalPaid + site.worker.totalPaid,
+      totalPending: production.worker.totalPending + site.worker.totalPending,
+    },
+  };
+}
+
+async function buildWorkerLedger(workerName, dateFilter = {}) {
+  return buildProductionWorkerReport(workerName, dateFilter);
 }
 
 app.get('/api/workerpayments', async(req,res)=>res.json(await WorkerPayment.find().sort({date:-1})));
@@ -479,7 +590,55 @@ app.get('/api/workers/ledger', async(req,res)=>{
   try {
     const { name, fromDate, toDate } = req.query;
     if (!name) return res.status(400).json({ message: 'Worker name required' });
-    res.json(await buildWorkerLedger(name, { fromDate, toDate }));
+    res.json(await buildProductionWorkerReport(name, { fromDate, toDate }));
+  } catch(e) { res.status(500).json({ message: e.message }); }
+});
+
+app.get('/api/workers/reports/production', async(req,res)=>{
+  try {
+    const { name, fromDate, toDate, date, item, color } = req.query;
+    if (!name) return res.status(400).json({ message: 'Worker name required' });
+    res.json(await buildProductionWorkerReport(name, { fromDate, toDate, date, item, color }));
+  } catch(e) { res.status(500).json({ message: e.message }); }
+});
+
+app.get('/api/workers/reports/site', async(req,res)=>{
+  try {
+    const { name, fromDate, toDate, date, site } = req.query;
+    if (!name) return res.status(400).json({ message: 'Worker name required' });
+    res.json(await buildSiteWorkerReport(name, { fromDate, toDate, date, site }));
+  } catch(e) { res.status(500).json({ message: e.message }); }
+});
+
+app.get('/api/workers/reports/overall', async(req,res)=>{
+  try {
+    const { name, fromDate, toDate, date } = req.query;
+    if (!name) return res.status(400).json({ message: 'Worker name required' });
+    res.json(await buildOverallWorkerAccount(name, { fromDate, toDate, date }));
+  } catch(e) { res.status(500).json({ message: e.message }); }
+});
+
+app.get('/api/workers/reports/production-list', async(req,res)=>{
+  try {
+    const workers = await Worker.find().sort({ name: 1 });
+    const { fromDate, toDate, date } = req.query;
+    const list = await Promise.all(workers.map(async w => {
+      const r = await buildProductionWorkerReport(w.name, { fromDate, toDate, date });
+      return { name: w.name, ...r.worker };
+    }));
+    res.json(list.filter(w => w.totalEarnings > 0 || w.totalPaid > 0));
+  } catch(e) { res.status(500).json({ message: e.message }); }
+});
+
+app.get('/api/workers/reports/site-list', async(req,res)=>{
+  try {
+    const workers = await Worker.find().sort({ name: 1 });
+    const { fromDate, toDate, date, site } = req.query;
+    const list = await Promise.all(workers.map(async w => {
+      const r = await buildSiteWorkerReport(w.name, { fromDate, toDate, date, site });
+      return { name: w.name, ...r.worker };
+    }));
+    res.json(list.filter(w => w.totalEarnings > 0 || w.totalPaid > 0));
   } catch(e) { res.status(500).json({ message: e.message }); }
 });
 
