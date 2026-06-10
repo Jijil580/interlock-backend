@@ -21,11 +21,18 @@ const SiteWorkSchema = new mongoose.Schema({ customerName:String, phone:String, 
 const WorkerReportSchema = new mongoose.Schema({ siteName:String, phoneNo:String, startingDate:String, workerName:String, totalArea:String, workingCost:String, extraWork:String, extraMaterial:String, totalWorkingArea:String, totalAmount:String, note:String, paymentMode:String, upiId:String, bankName:String, bankBranch:String, bankAccount:String, amountReceivedBy:String, materialSupply:String, materialType:String, signatures:{supervisor:Boolean,office:Boolean,admin:Boolean}, addedBy:String }, {timestamps:true});
 const DailyReportSchema = new mongoose.Schema({ date:String, siteName:String, siteId:String, siteStatus:String, workersCount:String, totalArea:String, completedToday:String, totalCompleted:String, interlockType:String, dayNotes:String, materialsUnloaded:String, materialQty:String, equipment:String, supplierName:String, materialRemarks:String, extraWorkDesc:String, extraWorkQty:String, extraWorkCost:String, extraWorkRemarks:String, payments:Array, totalPayments:Number, complaints:String, actionTaken:String, complaintRemarks:String, addedBy:String, newSite:String, runningSite:String, workersDetail:String, materialSupply:String, dayNote:String, expenses:String, workerPayments:[{workerName:String,amount:Number,date:String,note:String}] }, {timestamps:true});
 const WorkPlanSchema = new mongoose.Schema({ date:String, siteName:String, task:String, workers:String, materials:String, note:String, status:{type:String,default:'planned'}, fromDate:String, toDate:String, site:String, plannedWork:String, workersAllocated:String, materialsNeeded:String, estimatedCost:Number, paymentPlan:String, notes:String, addedBy:String }, {timestamps:true});
-const WorkerSchema = new mongoose.Schema({ name:String, phone:String, address:String, role:String, workerCategory:String, workLocationType:String, paymentType:String, customPaymentType:String, rateType:String, rateAmount:Number, addedBy:String }, {timestamps:true});
+const WorkerSchema = new mongoose.Schema({ name:String, phone:String, address:String, role:String, workerCategory:String, workLocationType:String, paymentType:String, customPaymentType:String, rateType:String, rateAmount:Number, totalProduction:{type:Number,default:0}, totalEarnings:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
 const WorkerPaymentSchema = new mongoose.Schema({ workerName:String, amount:Number, date:String, note:String, addedBy:String, source:String, reportDate:String }, {timestamps:true});
 const PurchaseSchema = new mongoose.Schema({ date:String, supplierName:String, supplierPhone:String, supplierMobile:String, supplierAddress:String, itemName:String, itemType:String, quantity:String, unit:String, unitPrice:String, totalAmount:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, vehicleNumber:String, vehicleType:String, driverName:String, driverPhone:String, deliveryAddress:String, note:String, addedBy:String }, {timestamps:true});
 const SupplierSchema = new mongoose.Schema({ name:String, mobile:String, phone:String, address:String, location:String, materialType:String, materials:[String], customMaterial:String, gstNumber:String, notes:String, note:String, totalPurchases:{type:Number,default:0}, totalPurchaseAmount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
 const MasterDataSchema = new mongoose.Schema({ name:String, category:String, shape:String, color:String, size:String, thickness:String, pricePerSqft:Number, pricePerSqm:Number, unit:String, price:Number, stock:Number, rate:Number, rateType:String, description:String, notes:String, addedBy:String }, {timestamps:true});
+const ProductionSiteSchema = new mongoose.Schema({
+  date:String, shift:String, workerId:String, workerName:String,
+  itemId:String, itemName:String, shape:String, color:String, unitType:String,
+  producedQty:Number, unit:String, productionRate:Number, totalAmount:Number,
+  paymentGiven:Number, amountPending:Number, remarks:String,
+  workType:String, notes:String, attendance:Array, totalCost:Number, addedBy:String,
+}, {timestamps:true});
 
 
 
@@ -220,6 +227,7 @@ const MasterInterlock = mongoose.model('MasterInterlock', MasterDataSchema);
 const MasterMaterial = mongoose.model('MasterMaterial', new mongoose.Schema({...MasterDataSchema.obj},{timestamps:true}));
 const MasterLabor = mongoose.model('MasterLabor', new mongoose.Schema({...MasterDataSchema.obj},{timestamps:true}));
 const MasterExtraWork = mongoose.model('MasterExtraWork', new mongoose.Schema({...MasterDataSchema.obj},{timestamps:true}));
+const ProductionSiteEntry = mongoose.model('ProductionSiteEntry', ProductionSiteSchema);
 
 async function seedData() {
   const count = await User.countDocuments();
@@ -385,8 +393,95 @@ app.post('/api/workers', async(req,res)=>res.json(await Worker.create(req.body))
 app.put('/api/workers/:id', async(req,res)=>res.json(await Worker.findByIdAndUpdate(req.params.id,req.body,{new:true})));
 app.delete('/api/workers/:id', async(req,res)=>{await Worker.findByIdAndDelete(req.params.id);res.json({ok:true});});
 
+async function updateStockFromProduction(itemName, qty, unit) {
+  if (!itemName || !qty) return null;
+  let stock = await Stock.findOne({ name: itemName });
+  if (stock) {
+    stock.quantity = (+(stock.quantity) || 0) + qty;
+    if (unit) stock.unit = unit;
+    await stock.save();
+  } else {
+    stock = await Stock.create({ name: itemName, quantity: qty, unit: unit || 'sqft', minStock: 0, price: 0 });
+  }
+  return stock;
+}
+
+async function updateWorkerEarnings(workerName, qty, amount) {
+  const worker = await Worker.findOne({ name: workerName });
+  if (!worker) return null;
+  worker.totalProduction = (+(worker.totalProduction) || 0) + qty;
+  worker.totalEarnings = (+(worker.totalEarnings) || 0) + amount;
+  worker.totalPending = Math.max(0, (+(worker.totalEarnings) || 0) - (+(worker.totalPaid) || 0));
+  await worker.save();
+  return worker;
+}
+
+async function recordWorkerPayment(workerName, amount, date, source, addedBy, note) {
+  const payment = await WorkerPayment.create({ workerName, amount, date, source: source || 'manual', addedBy, note });
+  const worker = await Worker.findOne({ name: workerName });
+  if (worker) {
+    worker.totalPaid = (+(worker.totalPaid) || 0) + amount;
+    worker.totalPending = Math.max(0, (+(worker.totalEarnings) || 0) - (+(worker.totalPaid) || 0));
+    await worker.save();
+  }
+  return payment;
+}
+
+async function buildWorkerLedger(workerName, dateFilter = {}) {
+  const worker = await Worker.findOne({ name: workerName });
+  const prodFilter = { workerName, producedQty: { $exists: true, $gt: 0 } };
+  const payFilter = { workerName };
+  if (dateFilter.fromDate || dateFilter.toDate) {
+    prodFilter.date = {};
+    payFilter.date = {};
+    if (dateFilter.fromDate) { prodFilter.date.$gte = dateFilter.fromDate; payFilter.date.$gte = dateFilter.fromDate; }
+    if (dateFilter.toDate) { prodFilter.date.$lte = dateFilter.toDate; payFilter.date.$lte = dateFilter.toDate; }
+  }
+  const productions = await ProductionSiteEntry.find(prodFilter).sort({ createdAt: -1 });
+  const payments = await WorkerPayment.find(payFilter).sort({ createdAt: -1 });
+  const itemMap = {};
+  productions.forEach(p => {
+    const key = p.itemName || 'Other';
+    if (!itemMap[key]) itemMap[key] = { item: key, quantity: 0, unit: p.unit || p.unitType || '' };
+    itemMap[key].quantity += +(p.producedQty) || 0;
+    if (p.unit) itemMap[key].unit = p.unit;
+  });
+  const totalProduction = productions.reduce((a, p) => a + (+(p.producedQty) || 0), 0);
+  const totalEarnings = productions.reduce((a, p) => a + (+(p.totalAmount) || 0), 0);
+  const totalPaid = payments.reduce((a, p) => a + (+(p.amount) || 0), 0);
+  return {
+    worker: {
+      name: workerName,
+      role: worker?.role || '',
+      phone: worker?.phone || '',
+      totalProduction,
+      totalEarnings,
+      totalPaid,
+      totalPending: Math.max(0, totalEarnings - totalPaid),
+    },
+    itemSummary: Object.values(itemMap),
+    productions,
+    payments,
+  };
+}
+
 app.get('/api/workerpayments', async(req,res)=>res.json(await WorkerPayment.find().sort({date:-1})));
-app.post('/api/workerpayments', async(req,res)=>res.json(await WorkerPayment.create(req.body)));
+app.post('/api/workerpayments', async(req,res)=>{
+  try {
+    const { workerName, amount, date, note, addedBy, source } = req.body;
+    if (!workerName || !amount) return res.status(400).json({ message: 'Worker name and amount required' });
+    const payment = await recordWorkerPayment(workerName, +(amount), date || new Date().toISOString().split('T')[0], source || 'worker-payment', addedBy, note);
+    res.json(payment);
+  } catch(e) { res.status(400).json({ message: e.message }); }
+});
+
+app.get('/api/workers/ledger', async(req,res)=>{
+  try {
+    const { name, fromDate, toDate } = req.query;
+    if (!name) return res.status(400).json({ message: 'Worker name required' });
+    res.json(await buildWorkerLedger(name, { fromDate, toDate }));
+  } catch(e) { res.status(500).json({ message: e.message }); }
+});
 
 app.get('/api/purchases', async(req,res)=>{
   try {
@@ -489,12 +584,98 @@ app.get('/api/suppliers/reports', async(req,res)=>{
   } catch(e) { res.status(500).json({ message: e.message }); }
 });
 
-// Production Site
-const ProductionSiteSchema = new mongoose.Schema({ date:String, workType:String, notes:String, attendance:Array, totalCost:Number, addedBy:String }, {timestamps:true});
-const ProductionSiteEntry = mongoose.model("ProductionSiteEntry", ProductionSiteSchema);
-app.get("/api/productionsite", async(req,res)=>res.json(await ProductionSiteEntry.find().sort({date:-1})));
-app.post("/api/productionsite", async(req,res)=>res.json(await ProductionSiteEntry.create(req.body)));
+app.get("/api/productionsite", async(req,res)=>{
+  try {
+    const { worker, item, color, date, fromDate, toDate } = req.query;
+    const filter = {};
+    if (worker) filter.workerName = { $regex: worker, $options: 'i' };
+    if (item) filter.itemName = { $regex: item, $options: 'i' };
+    if (color) filter.color = { $regex: color, $options: 'i' };
+    if (date) filter.date = date;
+    if (fromDate || toDate) {
+      filter.date = {};
+      if (fromDate) filter.date.$gte = fromDate;
+      if (toDate) filter.date.$lte = toDate;
+    }
+    res.json(await ProductionSiteEntry.find(filter).sort({ createdAt: -1 }));
+  } catch(e) { res.status(500).json({ message: e.message }); }
+});
+
+app.post("/api/productionsite", async(req,res)=>{
+  try {
+    const body = req.body;
+    if (body.workerName && body.itemName && body.producedQty != null) {
+      const producedQty = +(body.producedQty) || 0;
+      const productionRate = +(body.productionRate) || 0;
+      const totalAmount = producedQty * productionRate;
+      const paymentGiven = +(body.paymentGiven) || 0;
+      const amountPending = Math.max(0, totalAmount - paymentGiven);
+      const entry = await ProductionSiteEntry.create({
+        ...body, producedQty, productionRate, totalAmount, paymentGiven, amountPending,
+      });
+      await updateStockFromProduction(body.itemName, producedQty, body.unit || body.unitType);
+      await updateWorkerEarnings(body.workerName, producedQty, totalAmount);
+      if (paymentGiven > 0) {
+        await recordWorkerPayment(body.workerName, paymentGiven, body.date, 'production', body.addedBy, `Production: ${body.itemName}`);
+      }
+      return res.json(entry);
+    }
+    res.json(await ProductionSiteEntry.create(body));
+  } catch(e) { res.status(400).json({ message: e.message }); }
+});
+
 app.put("/api/productionsite/:id", async(req,res)=>res.json(await ProductionSiteEntry.findByIdAndUpdate(req.params.id,req.body,{new:true})));
+
+app.get('/api/productionsite/reports', async(req,res)=>{
+  try {
+    const { type, fromDate, toDate, pending } = req.query;
+    const filter = { producedQty: { $exists: true, $gt: 0 } };
+    if (fromDate || toDate) {
+      filter.date = {};
+      if (fromDate) filter.date.$gte = fromDate;
+      if (toDate) filter.date.$lte = toDate;
+    }
+    const entries = await ProductionSiteEntry.find(filter).sort({ createdAt: -1 });
+    const workers = await Worker.find().sort({ name: 1 });
+
+    const workerMap = {};
+    entries.forEach(e => {
+      if (!workerMap[e.workerName]) workerMap[e.workerName] = { worker: e.workerName, quantity: 0, earnings: 0, paid: 0 };
+      workerMap[e.workerName].quantity += +(e.producedQty) || 0;
+      workerMap[e.workerName].earnings += +(e.totalAmount) || 0;
+      workerMap[e.workerName].paid += +(e.paymentGiven) || 0;
+    });
+
+    const itemMap = {};
+    const colorMap = {};
+    entries.forEach(e => {
+      const ik = e.itemName || 'Other';
+      if (!itemMap[ik]) itemMap[ik] = { item: ik, quantity: 0, unit: e.unit || '', amount: 0 };
+      itemMap[ik].quantity += +(e.producedQty) || 0;
+      itemMap[ik].amount += +(e.totalAmount) || 0;
+      const ck = e.color || 'Other';
+      if (!colorMap[ck]) colorMap[ck] = { color: ck, quantity: 0, amount: 0 };
+      colorMap[ck].quantity += +(e.producedQty) || 0;
+      colorMap[ck].amount += +(e.totalAmount) || 0;
+    });
+
+    let pendingWorkers = workers.filter(w => (+(w.totalPending) || 0) > 0).map(w => ({
+      name: w.name, totalEarnings: w.totalEarnings, totalPaid: w.totalPaid, totalPending: w.totalPending,
+    }));
+    if (pending === 'true') return res.json({ pendingWorkers, entries: [] });
+
+    res.json({
+      totalEntries: entries.length,
+      totalQuantity: entries.reduce((a, e) => a + (+(e.producedQty) || 0), 0),
+      totalAmount: entries.reduce((a, e) => a + (+(e.totalAmount) || 0), 0),
+      workerWise: Object.values(workerMap),
+      itemWise: Object.values(itemMap),
+      colorWise: Object.values(colorMap),
+      pendingWorkers,
+      entries: type === 'detail' ? entries : undefined,
+    });
+  } catch(e) { res.status(500).json({ message: e.message }); }
+});
 
 
 // Device Management
