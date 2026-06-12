@@ -393,15 +393,22 @@ app.post('/api/workers', async(req,res)=>res.json(await Worker.create(req.body))
 app.put('/api/workers/:id', async(req,res)=>res.json(await Worker.findByIdAndUpdate(req.params.id,req.body,{new:true})));
 app.delete('/api/workers/:id', async(req,res)=>{await Worker.findByIdAndDelete(req.params.id);res.json({ok:true});});
 
-async function updateStockFromProduction(itemName, qty, unit) {
+async function stockKeyFromProduction(itemName, color) {
+  const name = String(itemName || '').trim();
+  const col = String(color || '').trim();
+  return col ? `${name} (${col})` : name;
+}
+
+async function updateStockFromProduction(itemName, qty, unit, color) {
   if (!itemName || !qty) return null;
-  let stock = await Stock.findOne({ name: itemName });
+  const stockName = stockKeyFromProduction(itemName, color);
+  let stock = await Stock.findOne({ name: stockName });
   if (stock) {
     stock.quantity = (+(stock.quantity) || 0) + qty;
     if (unit) stock.unit = unit;
     await stock.save();
   } else {
-    stock = await Stock.create({ name: itemName, quantity: qty, unit: unit || 'sqft', minStock: 0, price: 0 });
+    stock = await Stock.create({ name: stockName, quantity: qty, unit: unit || 'sqft', minStock: 0, price: 0 });
   }
   return stock;
 }
@@ -766,13 +773,15 @@ app.post("/api/productionsite", async(req,res)=>{
     if (body.workerName && body.itemName && body.producedQty != null) {
       const producedQty = +(body.producedQty) || 0;
       const productionRate = +(body.productionRate) || 0;
+      if (!producedQty) return res.status(400).json({ message: 'Produced quantity is required' });
+      if (!productionRate) return res.status(400).json({ message: 'Rate per unit must be entered manually' });
       const totalAmount = producedQty * productionRate;
       const paymentGiven = +(body.paymentGiven) || 0;
       const amountPending = Math.max(0, totalAmount - paymentGiven);
       const entry = await ProductionSiteEntry.create({
         ...body, producedQty, productionRate, totalAmount, paymentGiven, amountPending,
       });
-      await updateStockFromProduction(body.itemName, producedQty, body.unit || body.unitType);
+      await updateStockFromProduction(body.itemName, producedQty, body.unit || body.unitType, body.color);
       await updateWorkerEarnings(body.workerName, producedQty, totalAmount);
       if (paymentGiven > 0) {
         await recordWorkerPayment(body.workerName, paymentGiven, body.date, 'production', body.addedBy, `Production: ${body.itemName}`);
