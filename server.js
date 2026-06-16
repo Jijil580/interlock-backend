@@ -383,7 +383,13 @@ app.put('/api/workerreport/:id', async(req,res)=>res.json(await WorkerReport.fin
 app.get('/api/dailyreport', async(req,res)=>res.json(await DailyReport.find().sort({createdAt:-1})));
 app.post('/api/dailyreport', async(req,res)=>{
   try {
-    const report = await DailyReport.create(req.body);
+    const body = { ...req.body, payments: (req.body.payments || []).filter(p => p.type !== 'Worker Payment') };
+    const duplicate = await findDuplicateWorkerEntry(body);
+    if (duplicate) return res.status(409).json({
+      message: 'Worker work entry already exists for this date and site.',
+      existingReportId: duplicate._id
+    });
+    const report = await DailyReport.create(body);
     if (report.workerEntries && report.workerEntries.length > 0) {
       for (const we of report.workerEntries) {
         if (we.workerName) {
@@ -397,7 +403,13 @@ app.post('/api/dailyreport', async(req,res)=>{
 app.put('/api/dailyreport/:id', async(req,res)=>{
   try {
     const oldReport = await DailyReport.findById(req.params.id);
-    const newReport = await DailyReport.findByIdAndUpdate(req.params.id,req.body,{new:true});
+    const body = { ...req.body, payments: (req.body.payments || []).filter(p => p.type !== 'Worker Payment') };
+    const duplicate = await findDuplicateWorkerEntry(body, req.params.id);
+    if (duplicate) return res.status(409).json({
+      message: 'Worker work entry already exists for this date and site.',
+      existingReportId: duplicate._id
+    });
+    const newReport = await DailyReport.findByIdAndUpdate(req.params.id,body,{new:true});
     const workersToSync = new Set();
     if (oldReport && oldReport.workerEntries) {
       oldReport.workerEntries.forEach(we => { if (we.workerName) workersToSync.add(we.workerName); });
@@ -420,6 +432,40 @@ app.get('/api/workers', async(req,res)=>res.json(await Worker.find().sort({name:
 app.post('/api/workers', async(req,res)=>res.json(await Worker.create(req.body)));
 app.put('/api/workers/:id', async(req,res)=>res.json(await Worker.findByIdAndUpdate(req.params.id,req.body,{new:true})));
 app.delete('/api/workers/:id', async(req,res)=>{await Worker.findByIdAndDelete(req.params.id);res.json({ok:true});});
+
+function normKey(v) {
+  return String(v || '').trim().toLowerCase();
+}
+
+async function findDuplicateWorkerEntry(report, excludeId) {
+  const entries = (report.workerEntries || []).filter(we => we.workerName && we.workCategory);
+  if (!report.date || !report.siteName || entries.length === 0) return null;
+
+  const seen = new Set();
+  for (const we of entries) {
+    const key = `${normKey(we.workerName)}|${normKey(we.workCategory)}`;
+    if (seen.has(key)) return { _id: excludeId || 'current-report' };
+    seen.add(key);
+  }
+
+  const sameDayReports = await DailyReport.find({
+    ...(excludeId ? { _id: { $ne: excludeId } } : {}),
+    date: report.date,
+    $or: [
+      { siteName: report.siteName },
+      ...(report.siteId ? [{ siteId: report.siteId }] : [])
+    ]
+  });
+
+  return sameDayReports.find(r =>
+    (r.workerEntries || []).some(existing =>
+      entries.some(incoming =>
+        normKey(existing.workerName) === normKey(incoming.workerName) &&
+        normKey(existing.workCategory) === normKey(incoming.workCategory)
+      )
+    )
+  ) || null;
+}
 
 async function stockKeyFromProduction(itemName, color) {
   const name = String(itemName || '').trim();
@@ -449,23 +495,27 @@ async function syncWorkerTotals(workerName) {
   const prodEntries = await ProductionSiteEntry.find({ workerName });
   const totalProdQty = prodEntries.reduce((sum, e) => sum + (+(e.producedQty) || 0), 0);
   const totalProdEarnings = prodEntries.reduce((sum, e) => sum + (+(e.totalAmount) || 0), 0);
+  const totalProdPaid = prodEntries.reduce((sum, e) => sum + (+(e.paymentGiven) || 0), 0);
 
   // 2. Site work daily reports (area and earnings)
   const dailyReports = await DailyReport.find({ "workerEntries.workerName": workerName });
   let totalSiteArea = 0;
   let totalSiteEarnings = 0;
+  let totalSitePaid = 0;
   dailyReports.forEach(r => {
     (r.workerEntries || []).forEach(we => {
       if (we.workerName === workerName) {
         totalSiteArea += (+(we.workArea) || 0);
         totalSiteEarnings += (+(we.amountEarned || we.salary || 0));
+        totalSitePaid += (+(we.paymentGiven) || 0);
       }
     });
   });
 
-  // 3. Worker payments
-  const payments = await WorkerPayment.find({ workerName });
-  const totalPaid = payments.reduce((sum, p) => sum + (+(p.amount) || 0), 0);
+  // Manual ledger payments remain separate; production/site entry payments come from their source entries.
+  const payments = await WorkerPayment.find({ workerName, source: { $nin: ['production', 'daily-report', 'supervisor_report'] } });
+  const totalManualPaid = payments.reduce((sum, p) => sum + (+(p.amount) || 0), 0);
+  const totalPaid = totalProdPaid + totalSitePaid + totalManualPaid;
 
   // Update cumulative totals
   worker.totalProduction = totalProdQty + totalSiteArea;
@@ -583,7 +633,7 @@ async function buildSiteWorkerReport(workerName, filters = {}) {
       siteMap[sk].entries.push(row);
     });
 
-    (r.payments || []).filter(p => p.type === 'Worker Payment' && p.workerName === workerName).forEach(p => {
+    (r.payments || []).filter(p => false && p.type === 'Worker Payment' && p.workerName === workerName).forEach(p => {
       const paid = +(p.amount || 0);
       const row = {
         date: r.date, siteName: r.siteName, dutyArea: '—', workDone: 'Additional Payment',
