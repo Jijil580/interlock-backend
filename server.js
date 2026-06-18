@@ -996,6 +996,133 @@ app.post("/api/devices/check", async(req,res)=>{
 app.put("/api/devices/:id", async(req,res)=>res.json(await Device.findByIdAndUpdate(req.params.id,req.body,{new:true})));
 app.delete("/api/devices/:id", async(req,res)=>{await Device.findByIdAndDelete(req.params.id);res.json({ok:true});});
 
+function cashFlowDateFilter(fromDate, toDate) {
+  if (!fromDate && !toDate) return undefined;
+  const date = {};
+  if (fromDate) date.$gte = fromDate;
+  if (toDate) date.$lte = toDate;
+  return date;
+}
+
+function cashFlowRow(map, date, person, personRole) {
+  const key = `${date}|${person}|${personRole}`;
+  if (!map[key]) {
+    map[key] = {
+      date, person, personRole,
+      received: 0, salesAmount: 0, customerPayments: 0,
+      workerPayments: 0, vehicleCharges: 0, materialPayments: 0,
+      equipmentPayments: 0, purchasePayments: 0, otherExpenses: 0,
+      totalExpenses: 0, netBalance: 0,
+    };
+  }
+  return map[key];
+}
+
+function paymentKind(type) {
+  return String(type || '').trim().toLowerCase();
+}
+
+app.get('/api/cashflow', async(req,res)=>{
+  try {
+    const { role, name, personRole, person, fromDate, toDate } = req.query;
+    if (!['admin', 'supervisor', 'user'].includes(role)) {
+      return res.status(400).json({ message: 'Valid role is required' });
+    }
+
+    const date = cashFlowDateFilter(fromDate, toDate);
+    const people = role === 'admin'
+      ? await User.find({ role: { $in: ['supervisor', 'user'] } }, 'name role').lean()
+      : [];
+    const namesFor = targetRole => people
+      .filter(user => user.role === targetRole && (!person || user.name === person))
+      .map(user => user.name);
+    const ownerFilter = role === 'admin' ? {} : { addedBy: name };
+    const rows = {};
+
+    if (role === 'admin' ? personRole !== 'user' : role === 'supervisor') {
+      const reportFilter = role === 'admin' ? { addedBy: { $in: namesFor('supervisor') } } : { ...ownerFilter };
+      if (date) reportFilter.date = date;
+      const reports = await DailyReport.find(reportFilter).lean();
+      reports.forEach(report => {
+        const owner = report.addedBy || 'Unknown';
+        const row = cashFlowRow(rows, report.date || '', owner, 'supervisor');
+        (report.workerEntries || []).forEach(worker => {
+          row.workerPayments += +(worker.paymentGiven) || 0;
+        });
+        (report.payments || []).forEach(payment => {
+          const amount = +(payment.amount) || 0;
+          const kind = paymentKind(payment.type);
+          if (kind === 'site payment received' || kind === 'client payment received') row.received += amount;
+          else if (kind.includes('vehicle')) row.vehicleCharges += amount;
+          else if (kind === 'material payment') row.materialPayments += amount;
+          else if (kind === 'equipment payment') row.equipmentPayments += amount;
+          else if (kind === 'other expense') row.otherExpenses += amount;
+        });
+      });
+    }
+
+    if (role === 'admin' ? personRole !== 'supervisor' : role === 'user') {
+      const userOwnerFilter = role === 'admin' ? { addedBy: { $in: namesFor('user') } } : { ...ownerFilter };
+      const salesFilter = { ...userOwnerFilter };
+      const purchaseFilter = { ...userOwnerFilter };
+      const expenseFilter = { ...userOwnerFilter };
+      if (date) {
+        salesFilter.date = date;
+        purchaseFilter.date = date;
+        expenseFilter.date = date;
+      }
+      const [sales, purchases, expenseReports] = await Promise.all([
+        Sales.find(salesFilter).lean(),
+        Purchase.find(purchaseFilter).lean(),
+        DailyReport.find(expenseFilter).lean(),
+      ]);
+      sales.forEach(sale => {
+        const owner = sale.addedBy || 'Unknown';
+        const row = cashFlowRow(rows, sale.date || '', owner, 'user');
+        row.salesAmount += +(sale.total) || 0;
+        row.customerPayments += +(sale.amountPaid) || 0;
+        row.received += +(sale.amountPaid) || 0;
+      });
+      purchases.forEach(purchase => {
+        const owner = purchase.addedBy || 'Unknown';
+        const row = cashFlowRow(rows, purchase.date || '', owner, 'user');
+        row.purchasePayments += +(purchase.amountPaid) || 0;
+      });
+      expenseReports.forEach(report => {
+        const owner = report.addedBy || 'Unknown';
+        (report.payments || []).forEach(payment => {
+          const kind = paymentKind(payment.type);
+          if (kind !== 'other expense' && kind !== 'other user transaction') return;
+          const row = cashFlowRow(rows, report.date || '', owner, 'user');
+          row.otherExpenses += +(payment.amount) || 0;
+        });
+      });
+    }
+
+    const history = Object.values(rows).map(row => {
+      const supervisorExpenses = row.workerPayments + row.vehicleCharges + row.materialPayments + row.equipmentPayments + row.otherExpenses;
+      const userExpenses = row.purchasePayments + row.otherExpenses;
+      row.totalExpenses = row.personRole === 'supervisor' ? supervisorExpenses : userExpenses;
+      row.netBalance = row.received - row.totalExpenses;
+      return row;
+    }).sort((a,b) => b.date.localeCompare(a.date) || a.person.localeCompare(b.person));
+
+    const total = history.reduce((sum, row) => {
+      Object.keys(sum).forEach(key => { sum[key] += +(row[key]) || 0; });
+      return sum;
+    }, {
+      received: 0, salesAmount: 0, customerPayments: 0,
+      workerPayments: 0, vehicleCharges: 0, materialPayments: 0,
+      equipmentPayments: 0, purchasePayments: 0, otherExpenses: 0,
+      totalExpenses: 0, netBalance: 0,
+    });
+
+    res.json({ history, total });
+  } catch(e) {
+    res.status(500).json({ message: e.message });
+  }
+});
+
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, async()=>{
