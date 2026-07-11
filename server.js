@@ -32,7 +32,9 @@ const ProductionSiteSchema = new mongoose.Schema({
   producedQty:Number, unit:String, productionRate:Number, totalAmount:Number,
   paymentGiven:Number, amountPending:Number, remarks:String,
   workType:String, notes:String, attendance:Array, totalCost:Number, addedBy:String,
+  dedupeKey:String,
 }, {timestamps:true});
+ProductionSiteSchema.index({ dedupeKey: 1 }, { unique: true, sparse: true });
 
 
 
@@ -794,6 +796,89 @@ async function recordWorkerPayment(workerName, amount, date, source, addedBy, no
   return payment;
 }
 
+function normalizeDedupePart(value) {
+  return String(value ?? '').trim().toLowerCase();
+}
+
+function productionDedupeKey(data = {}) {
+  return [
+    data.date,
+    data.shift,
+    data.addedBy,
+    data.workerId,
+    data.workerName,
+    data.itemId,
+    data.itemName,
+    data.category,
+    data.shape,
+    data.color,
+    data.size,
+    data.thickness,
+    data.unit || data.unitType,
+    +(data.producedQty) || 0,
+    +(data.productionRate) || 0,
+    +(data.paymentGiven) || 0,
+  ].map(normalizeDedupePart).join('|');
+}
+
+function productionDuplicateFilter(data = {}) {
+  const filter = {
+    date: data.date || '',
+    workerName: data.workerName || '',
+    itemName: data.itemName || '',
+    color: data.color || '',
+    producedQty: +(data.producedQty) || 0,
+    unit: data.unit || data.unitType || '',
+    productionRate: +(data.productionRate) || 0,
+    paymentGiven: +(data.paymentGiven) || 0,
+    addedBy: data.addedBy || '',
+  };
+  if (data.shift) filter.shift = data.shift;
+  if (data.itemId) filter.itemId = data.itemId;
+  if (data.category) filter.category = data.category;
+  return filter;
+}
+
+async function removeDuplicateProductionSideEffects(entry) {
+  const doc = entry.toObject ? entry.toObject() : entry;
+  await updateStockFromProduction({ ...doc, producedQty: -(+(doc.producedQty) || 0) });
+  if ((+(doc.paymentGiven) || 0) > 0) {
+    await WorkerPayment.findOneAndDelete({
+      workerName: doc.workerName,
+      amount: +(doc.paymentGiven) || 0,
+      date: doc.date,
+      source: 'production',
+      note: `Production: ${doc.itemName}`,
+    }).sort({ createdAt: -1 });
+  }
+  await ProductionSiteEntry.deleteOne({ _id: doc._id });
+}
+
+async function cleanupDuplicateProductionEntries() {
+  const entries = await ProductionSiteEntry.find({ producedQty: { $exists: true, $gt: 0 } }).sort({ createdAt: 1 });
+  const seen = new Map();
+  const affectedWorkers = new Set();
+  let removed = 0;
+
+  for (const entry of entries) {
+    const key = entry.dedupeKey || productionDedupeKey(entry);
+    if (!seen.has(key)) {
+      if (!entry.dedupeKey) {
+        entry.dedupeKey = key;
+        await entry.save();
+      }
+      seen.set(key, entry._id.toString());
+      continue;
+    }
+    affectedWorkers.add(entry.workerName);
+    await removeDuplicateProductionSideEffects(entry);
+    removed += 1;
+  }
+
+  for (const workerName of affectedWorkers) await syncWorkerTotals(workerName);
+  return removed;
+}
+
 function applyDateFilter(filter, dateFilter, field = 'date') {
   if (dateFilter.date) filter[field] = dateFilter.date;
   if (dateFilter.fromDate || dateFilter.toDate) {
@@ -1198,6 +1283,7 @@ app.get('/api/suppliers/reports', async(req,res)=>{
 
 app.get("/api/productionsite", async(req,res)=>{
   try {
+    await cleanupDuplicateProductionEntries();
     const { worker, item, color, date, fromDate, toDate } = req.query;
     const filter = {};
     if (worker) filter.workerName = { $regex: worker, $options: 'i' };
@@ -1228,9 +1314,26 @@ app.post("/api/productionsite", async(req,res)=>{
       const totalAmount = producedQty * productionRate;
       const paymentGiven = +(body.paymentGiven) || 0;
       const amountPending = Math.max(0, totalAmount - paymentGiven);
-      const entry = await ProductionSiteEntry.create({
+      const entryData = {
         ...body, producedQty, productionRate, totalAmount, paymentGiven, amountPending,
-      });
+      };
+      entryData.dedupeKey = productionDedupeKey(entryData);
+      const duplicate = await ProductionSiteEntry.findOne({
+        $or: [{ dedupeKey: entryData.dedupeKey }, productionDuplicateFilter(entryData)]
+      }).sort({ createdAt: 1 }).lean();
+      if (duplicate) {
+        return res.json({ ...duplicate, duplicateIgnored: true, message: 'Duplicate production entry ignored.' });
+      }
+      let entry;
+      try {
+        entry = await ProductionSiteEntry.create(entryData);
+      } catch (err) {
+        if (err && err.code === 11000) {
+          const existing = await ProductionSiteEntry.findOne({ dedupeKey: entryData.dedupeKey }).lean();
+          if (existing) return res.json({ ...existing, duplicateIgnored: true, message: 'Duplicate production entry ignored.' });
+        }
+        throw err;
+      }
       await updateStockFromProduction({ ...body, producedQty });
       await syncWorkerTotals(body.workerName);
       if (paymentGiven > 0) {
@@ -1246,6 +1349,7 @@ app.put("/api/productionsite/:id", async(req,res)=>res.json(await ProductionSite
 
 app.get('/api/productionsite/reports', async(req,res)=>{
   try {
+    await cleanupDuplicateProductionEntries();
     const { type, fromDate, toDate, pending } = req.query;
     const filter = { producedQty: { $exists: true, $gt: 0 } };
     if (fromDate || toDate) {
