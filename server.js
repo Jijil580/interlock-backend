@@ -401,7 +401,7 @@ app.put('/api/workerreport/:id', async(req,res)=>res.json(await WorkerReport.fin
 app.get('/api/dailyreport', async(req,res)=>res.json(await DailyReport.find().sort({createdAt:-1})));
 app.post('/api/dailyreport', async(req,res)=>{
   try {
-    const body = { ...req.body, payments: (req.body.payments || []).filter(p => p.type !== 'Worker Payment') };
+    const body = normalizeDailyReportBody(req.body);
     const duplicate = await findDuplicateWorkerEntry(body);
     if (duplicate) return res.status(409).json({
       message: 'Worker work entry already exists for this date and site.',
@@ -428,7 +428,7 @@ app.post('/api/dailyreport', async(req,res)=>{
 app.put('/api/dailyreport/:id', async(req,res)=>{
   try {
     const oldReport = await DailyReport.findById(req.params.id);
-    const body = { ...req.body, payments: (req.body.payments || []).filter(p => p.type !== 'Worker Payment') };
+    const body = normalizeDailyReportBody(req.body);
     const duplicate = await findDuplicateWorkerEntry(body, req.params.id);
     if (duplicate) return res.status(409).json({
       message: 'Worker work entry already exists for this date and site.',
@@ -502,6 +502,33 @@ app.delete('/api/workers/:id', async(req,res)=>{await Worker.findByIdAndDelete(r
 
 function normKey(v) {
   return String(v || '').trim().toLowerCase();
+}
+
+function normalizeWorkerEntry(we = {}) {
+  const workArea = +(we.workArea || 0) || 0;
+  const rate = +(we.rate || 0) || 0;
+  const calculatedAmount = workArea * rate;
+  const rawEarned = we.amountEarned ?? we.salary ?? calculatedAmount;
+  const amountEarned = +(rawEarned || 0) || calculatedAmount;
+  const paymentGiven = +(we.paymentGiven || 0) || 0;
+  const pending = Math.max(0, amountEarned - paymentGiven);
+  return {
+    ...we,
+    workArea,
+    rate,
+    salary: amountEarned,
+    amountEarned,
+    paymentGiven,
+    pending
+  };
+}
+
+function normalizeDailyReportBody(body = {}) {
+  return {
+    ...body,
+    payments: (body.payments || []).filter(p => p.type !== 'Worker Payment'),
+    workerEntries: (body.workerEntries || []).map(normalizeWorkerEntry)
+  };
 }
 
 async function findDuplicateWorkerEntry(report, excludeId) {
@@ -599,9 +626,10 @@ async function syncWorkerTotals(workerName) {
   dailyReports.forEach(r => {
     (r.workerEntries || []).forEach(we => {
       if (we.workerName === workerName) {
-        totalSiteArea += (+(we.workArea) || 0);
-        totalSiteEarnings += (+(we.amountEarned || we.salary || 0));
-        totalSitePaid += (+(we.paymentGiven) || 0);
+        const normalized = normalizeWorkerEntry(we);
+        totalSiteArea += normalized.workArea;
+        totalSiteEarnings += normalized.amountEarned;
+        totalSitePaid += normalized.paymentGiven;
       }
     });
   });
@@ -686,6 +714,16 @@ async function buildSiteWorkerReport(workerName, filters = {}) {
   const worker = await Worker.findOne({ name: workerName });
   const reportFilter = {};
   applyDateFilter(reportFilter, filters);
+  if (filters.viewerRole === 'supervisor' && filters.viewerName) {
+    const supervisorSites = await SiteWork.find({ addedBy: filters.viewerName }).select('customerName _id').lean();
+    const siteNames = supervisorSites.map(s => s.customerName).filter(Boolean);
+    const siteIds = supervisorSites.map(s => String(s._id));
+    reportFilter.$or = [
+      { addedBy: filters.viewerName },
+      ...(siteNames.length ? [{ siteName: { $in: siteNames } }] : []),
+      ...(siteIds.length ? [{ siteId: { $in: siteIds } }] : [])
+    ];
+  }
   const reports = await DailyReport.find(reportFilter).sort({ date: -1 });
 
   const history = [];
@@ -698,14 +736,15 @@ async function buildSiteWorkerReport(workerName, filters = {}) {
       if (we.workerName !== workerName) return;
       if (filters.item && !(we.workCategory || '').toLowerCase().includes(filters.item.toLowerCase())) return;
 
-      const earned = +(we.amountEarned || we.salary || 0);
-      const paid = +(we.paymentGiven || 0);
+      const normalized = normalizeWorkerEntry(we);
+      const earned = normalized.amountEarned;
+      const paid = normalized.paymentGiven;
       const row = {
         date: r.date, siteName: r.siteName, dutyArea: we.dutyArea || '',
         workDone: we.workDone || '', workCategory: we.workCategory || '',
-        workArea: we.workArea || 0, unit: we.unit || '', rate: we.rate || 0,
+        workArea: normalized.workArea, unit: we.unit || '', rate: normalized.rate,
         amountEarned: earned, paymentGiven: paid,
-        balance: Math.max(0, earned - paid), paymentMode: we.paymentMode || '',
+        dailyPending: normalized.pending, balance: normalized.pending, paymentMode: we.paymentMode || '',
         remarks: we.remarks || '', attendance: we.attendance,
       };
       history.push(row);
@@ -715,13 +754,13 @@ async function buildSiteWorkerReport(workerName, filters = {}) {
         siteMap[sk] = {
           siteName: sk, categories: new Set(), dutyAreas: new Set(),
           workDone: [], totalArea: 0, totalEarned: 0, totalPaid: 0,
-          unit: we.unit || 'Sqft', rate: we.rate || 0, entries: []
+          unit: we.unit || 'Sqft', rate: normalized.rate, entries: []
         };
       }
       if (we.workCategory) siteMap[sk].categories.add(we.workCategory);
       if (we.dutyArea) siteMap[sk].dutyAreas.add(we.dutyArea);
       if (we.workDone) siteMap[sk].workDone.push(we.workDone);
-      siteMap[sk].totalArea += (+(we.workArea) || 0);
+      siteMap[sk].totalArea += normalized.workArea;
       siteMap[sk].totalEarned += earned;
       siteMap[sk].totalPaid += paid;
       siteMap[sk].entries.push(row);
@@ -835,9 +874,9 @@ app.get('/api/workers/reports/production', async(req,res)=>{
 
 app.get('/api/workers/reports/site', async(req,res)=>{
   try {
-    const { name, fromDate, toDate, date, site } = req.query;
+    const { name, fromDate, toDate, date, site, role, userName } = req.query;
     if (!name) return res.status(400).json({ message: 'Worker name required' });
-    res.json(await buildSiteWorkerReport(name, { fromDate, toDate, date, site }));
+    res.json(await buildSiteWorkerReport(name, { fromDate, toDate, date, site, viewerRole: role, viewerName: userName }));
   } catch(e) { res.status(500).json({ message: e.message }); }
 });
 
