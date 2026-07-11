@@ -12,10 +12,10 @@ mongoose.connect(process.env.MONGO_URI)
   .catch(err => console.log('❌ MongoDB Error:', err));
 
 const UserSchema = new mongoose.Schema({ name:String, username:{type:String,unique:true}, password:String, role:{type:String,enum:['admin','supervisor','user']}, avatar:String, active:{type:Boolean,default:true}, company:String }, {timestamps:true});
-const StockSchema = new mongoose.Schema({ name:String, unit:String, quantity:Number, minStock:Number, price:Number, company:String }, {timestamps:true});
+const StockSchema = new mongoose.Schema({ name:String, category:String, itemId:String, shape:String, color:String, size:String, thickness:String, unit:String, quantity:Number, minStock:Number, price:Number, company:String }, {timestamps:true});
 const RawMaterialSchema = new mongoose.Schema({ name:String, material:String, supplier:String, unit:String, quantity:Number, qty:Number, price:Number, costPerUnit:Number, lastPurchase:String, company:String }, {timestamps:true});
 const ProductionSchema = new mongoose.Schema({ date:String, product:String, shift:String, target:Number, produced:Number, machine:String, supervisor:String, status:{type:String,default:'pending'}, notes:String, note:String, company:String }, {timestamps:true});
-const SalesSchema = new mongoose.Schema({ date:String, customer:String, mobileNumber:String, address:String, product:String, interlockDetails:String, quantity:Number, unit:String, price:Number, unitPrice:Number, discount:{type:Number,default:0}, total:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, invoiceNumber:String, status:{type:String,default:'pending'}, addedBy:String, company:String }, {timestamps:true});
+const SalesSchema = new mongoose.Schema({ date:String, customer:String, mobileNumber:String, address:String, product:String, itemId:String, category:String, shape:String, color:String, size:String, thickness:String, interlockDetails:String, quantity:Number, unit:String, price:Number, unitPrice:Number, discount:{type:Number,default:0}, total:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, invoiceNumber:String, status:{type:String,default:'pending'}, addedBy:String, company:String }, {timestamps:true});
 const CustomerSchema = new mongoose.Schema({ mobile:{type:String,unique:true}, name:String, address:String, gstNumber:String, notes:String, totalPurchases:{type:Number,default:0}, totalSalesAmount:{type:Number,default:0}, totalDiscount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, totalQuantity:{type:Number,default:0}, company:String, addedBy:String }, {timestamps:true});
 const SiteWorkSchema = new mongoose.Schema({ customerName:String, phone:String, siteLocation:String, location:String, interlockType:String, interlockColor:String, selectedWorkers:[String], startDate:String, endDate:String, status:{type:String,default:'running'}, workUnit:String, workSize:String, ratePerUnit:String, baseWorkCost:String, extraWork:Array, extraMaterials:Array, materialCost:String, laborCost:String, totalCost:String, payments:Array, totalReceived:Number, pendingAmount:String, paymentStatus:{type:String,default:'pending'}, paymentMode:String, note:String, addedBy:String, workStatus:String, totalAmount:Number, paidAmount:Number, company:String }, {timestamps:true});
 const WorkerReportSchema = new mongoose.Schema({ siteName:String, phoneNo:String, startingDate:String, workerName:String, totalArea:String, workingCost:String, extraWork:String, extraMaterial:String, totalWorkingArea:String, totalAmount:String, note:String, paymentMode:String, upiId:String, bankName:String, bankBranch:String, bankAccount:String, amountReceivedBy:String, materialSupply:String, materialType:String, signatures:{supervisor:Boolean,office:Boolean,admin:Boolean}, addedBy:String }, {timestamps:true});
@@ -28,7 +28,7 @@ const SupplierSchema = new mongoose.Schema({ name:String, mobile:String, phone:S
 const MasterDataSchema = new mongoose.Schema({ name:String, category:String, shape:String, color:String, size:String, thickness:String, pricePerSqft:Number, pricePerSqm:Number, unit:String, price:Number, stock:Number, rate:Number, rateType:String, description:String, notes:String, addedBy:String }, {timestamps:true});
 const ProductionSiteSchema = new mongoose.Schema({
   date:String, shift:String, workerId:String, workerName:String,
-  itemId:String, itemName:String, shape:String, color:String, unitType:String,
+  itemId:String, itemName:String, category:String, shape:String, color:String, size:String, thickness:String, unitType:String,
   producedQty:Number, unit:String, productionRate:Number, totalAmount:Number,
   paymentGiven:Number, amountPending:Number, remarks:String,
   workType:String, notes:String, attendance:Array, totalCost:Number, addedBy:String,
@@ -294,12 +294,28 @@ app.post('/api/sales', async(req,res)=>{
     const amountPending = total - amountPaid;
     const status = amountPending <= 0 ? 'paid' : amountPaid > 0 ? 'partial' : 'pending';
     const sale = await Sales.create({ ...req.body, mobileNumber: mobile, total, discount, amountPaid, amountPending, status });
+    await adjustStockFromSale(sale, -1);
     await upsertCustomerFromSale(sale, req.body.saveToCustomerMaster !== false);
     res.json(sale);
   } catch(e) { res.status(400).json({ message: e.message }); }
 });
-app.put('/api/sales/:id', async(req,res)=>res.json(await Sales.findByIdAndUpdate(req.params.id,req.body,{new:true})));
-app.delete('/api/sales/:id', async(req,res)=>{await Sales.findByIdAndDelete(req.params.id);res.json({ok:true});});
+app.put('/api/sales/:id', async(req,res)=>{
+  try {
+    const oldSale = await Sales.findById(req.params.id);
+    if (oldSale) await adjustStockFromSale(oldSale, 1);
+    const sale = await Sales.findByIdAndUpdate(req.params.id, req.body, {new:true});
+    if (sale) await adjustStockFromSale(sale, -1);
+    res.json(sale);
+  } catch(e) { res.status(400).json({ message: e.message }); }
+});
+app.delete('/api/sales/:id', async(req,res)=>{
+  try {
+    const sale = await Sales.findById(req.params.id);
+    if (sale) await adjustStockFromSale(sale, 1);
+    await Sales.findByIdAndDelete(req.params.id);
+    res.json({ok:true});
+  } catch(e) { res.status(400).json({ message: e.message }); }
+});
 
 app.get('/api/customers', async(req,res)=>res.json(await Customer.find().sort({ name: 1 })));
 app.post('/api/customers', async(req,res)=>{
@@ -589,22 +605,75 @@ async function validateSiteWorkAssignedWorkers(site) {
   return null;
 }
 
-function stockKeyFromProduction(itemName, color) {
+function stockKeyFromProduction(itemName, color, category) {
   const name = String(itemName || '').trim();
   const col = String(color || '').trim();
-  return col ? `${name} (${col})` : name;
+  const cat = String(category || '').trim();
+  const suffix = [col].filter(Boolean).join(', ');
+  const item = suffix ? `${name} (${suffix})` : name;
+  return cat ? `${cat} - ${item}` : item;
 }
 
-async function updateStockFromProduction(itemName, qty, unit, color) {
+async function updateStockFromProduction(production) {
+  const { itemName, producedQty, unit, unitType, color, category, itemId, shape, size, thickness } = production || {};
+  const qty = +(producedQty) || 0;
   if (!itemName || !qty) return null;
-  const stockName = stockKeyFromProduction(itemName, color);
-  let stock = await Stock.findOne({ name: stockName });
+  const stockName = stockKeyFromProduction(itemName, color, category);
+  const exactFilter = itemId
+    ? { itemId: String(itemId), category: category || '' }
+    : { name: stockName, category: category || '' };
+  let stock = await Stock.findOne(exactFilter);
+  if (!stock) stock = await Stock.findOne({ name: stockName });
+  if (!stock && !category) stock = await Stock.findOne({ name: itemName });
   if (stock) {
     stock.quantity = (+(stock.quantity) || 0) + qty;
-    if (unit) stock.unit = unit;
+    stock.name = stock.name || stockName;
+    stock.category = stock.category || category || '';
+    stock.itemId = stock.itemId || itemId || '';
+    stock.shape = stock.shape || shape || '';
+    stock.color = stock.color || color || '';
+    stock.size = stock.size || size || '';
+    stock.thickness = stock.thickness || thickness || '';
+    if (unit || unitType) stock.unit = unit || unitType;
     await stock.save();
   } else {
-    stock = await Stock.create({ name: stockName, quantity: qty, unit: unit || 'sqft', minStock: 0, price: 0 });
+    stock = await Stock.create({
+      name: stockName, category: category || '', itemId: itemId || '',
+      shape: shape || '', color: color || '', size: size || '', thickness: thickness || '',
+      quantity: qty, unit: unit || unitType || 'sqft', minStock: 0, price: 0
+    });
+  }
+  return stock;
+}
+
+async function adjustStockFromSale(sale, direction = -1) {
+  const qty = (+(sale?.quantity) || 0) * direction;
+  const itemName = sale?.product || sale?.itemName;
+  if (!itemName || !qty) return null;
+  const category = sale?.category || '';
+  const stockName = stockKeyFromProduction(itemName, sale?.color, category);
+  const exactFilter = sale?.itemId
+    ? { itemId: String(sale.itemId), category }
+    : { name: stockName, category };
+  let stock = await Stock.findOne(exactFilter);
+  if (!stock) stock = await Stock.findOne({ name: stockName });
+  if (!stock && !category) stock = await Stock.findOne({ name: itemName });
+  if (stock) {
+    stock.quantity = (+(stock.quantity) || 0) + qty;
+    stock.category = stock.category || category;
+    stock.itemId = stock.itemId || sale?.itemId || '';
+    stock.shape = stock.shape || sale?.shape || '';
+    stock.color = stock.color || sale?.color || '';
+    stock.size = stock.size || sale?.size || '';
+    stock.thickness = stock.thickness || sale?.thickness || '';
+    if (sale?.unit) stock.unit = sale.unit;
+    await stock.save();
+  } else {
+    stock = await Stock.create({
+      name: stockName, category, itemId: sale?.itemId || '',
+      shape: sale?.shape || '', color: sale?.color || '', size: sale?.size || '', thickness: sale?.thickness || '',
+      quantity: qty, unit: sale?.unit || 'sqft', minStock: 0, price: +(sale?.price || 0) || 0
+    });
   }
   return stock;
 }
@@ -1097,7 +1166,7 @@ app.post("/api/productionsite", async(req,res)=>{
       const entry = await ProductionSiteEntry.create({
         ...body, producedQty, productionRate, totalAmount, paymentGiven, amountPending,
       });
-      await updateStockFromProduction(body.itemName, producedQty, body.unit || body.unitType, body.color);
+      await updateStockFromProduction({ ...body, producedQty });
       await syncWorkerTotals(body.workerName);
       if (paymentGiven > 0) {
         await recordWorkerPayment(body.workerName, paymentGiven, body.date, 'production', body.addedBy, `Production: ${body.itemName}`);
