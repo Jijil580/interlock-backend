@@ -510,7 +510,8 @@ function normalizeWorkerEntry(we = {}) {
   const calculatedAmount = workArea * rate;
   const rawEarned = we.amountEarned ?? we.salary ?? calculatedAmount;
   const amountEarned = +(rawEarned || 0) || calculatedAmount;
-  const paymentGiven = +(we.paymentGiven || 0) || 0;
+  const rawPayment = we.paymentGiven ?? we.paidAmount ?? we.amountPaid ?? we.payment ?? 0;
+  const paymentGiven = +(rawPayment || 0) || 0;
   const pending = Math.max(0, amountEarned - paymentGiven);
   return {
     ...we,
@@ -958,8 +959,7 @@ function siteCostOf(site) {
 
 function siteWorkPaymentsOf(site) {
   const payments = Array.isArray(site?.payments) ? site.payments : [];
-  const paymentHistory = payments.reduce((sum, p) => sum + (+(p.amount) || 0), 0);
-  return paymentHistory || +(site?.totalReceived || site?.paidAmount || 0);
+  return payments.reduce((sum, p) => sum + (+(p.amount) || 0), 0);
 }
 
 async function getDailySitePayments(site) {
@@ -973,10 +973,18 @@ async function getDailySitePayments(site) {
   }, 0), 0);
 }
 
+async function getLegacySiteWorkPayment(site, dailySitePayments = null) {
+  if (!site || (Array.isArray(site.payments) && site.payments.length > 0)) return 0;
+  const daily = dailySitePayments === null ? await getDailySitePayments(site) : dailySitePayments;
+  const storedReceived = +(site.totalReceived ?? site.paidAmount ?? 0) || 0;
+  return Math.max(0, storedReceived - daily);
+}
+
 async function recalcSiteFinancials(siteOrId) {
   const site = typeof siteOrId === 'string' ? await SiteWork.findById(siteOrId) : siteOrId;
   if (!site) return null;
-  const totalReceived = siteWorkPaymentsOf(site) + await getDailySitePayments(site);
+  const dailySitePayments = await getDailySitePayments(site);
+  const totalReceived = siteWorkPaymentsOf(site) + await getLegacySiteWorkPayment(site, dailySitePayments) + dailySitePayments;
   const pendingAmount = Math.max(0, siteCostOf(site) - totalReceived);
   const paymentStatus = pendingAmount === 0 && siteCostOf(site) > 0 ? 'paid' : totalReceived > 0 ? 'partial' : 'pending';
   site.totalReceived = totalReceived;
@@ -1224,7 +1232,7 @@ app.get('/api/cashflow', async(req,res)=>{
       if (date) reportFilter.date = date;
       const reports = await DailyReport.find(reportFilter).lean();
       const sites = await SiteWork.find(siteFilter).lean();
-      sites.forEach(site => {
+      for (const site of sites) {
         const owner = site.addedBy || 'Unknown';
         (site.payments || []).forEach(payment => {
           if (date && ((fromDate && payment.date < fromDate) || (toDate && payment.date > toDate))) return;
@@ -1233,7 +1241,16 @@ app.get('/api/cashflow', async(req,res)=>{
           row.received += amount;
           row.receivedDetails.push({ date: payment.date || site.startDate || '', site: site.customerName, source: 'Site Work', amount, paymentMode: payment.mode || site.paymentMode || '' });
         });
-      });
+        const legacyAmount = await getLegacySiteWorkPayment(site);
+        if (legacyAmount > 0) {
+          const legacyDate = site.startDate || site.createdAt?.toISOString?.().slice(0, 10) || '';
+          if (!date || !((fromDate && legacyDate < fromDate) || (toDate && legacyDate > toDate))) {
+            const row = cashFlowRow(rows, legacyDate, owner, 'supervisor');
+            row.received += legacyAmount;
+            row.receivedDetails.push({ date: legacyDate, site: site.customerName, source: 'Initial Site Work', amount: legacyAmount, paymentMode: site.paymentMode || '' });
+          }
+        }
+      }
       reports.forEach(report => {
         const owner = report.addedBy || 'Unknown';
         const row = cashFlowRow(rows, report.date || '', owner, 'supervisor');
