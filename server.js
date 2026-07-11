@@ -48,6 +48,10 @@ function normalizeMobile(m) {
   return String(m || '').replace(/\D/g, '').slice(-10);
 }
 
+function escapeRegex(v) {
+  return String(v || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function buildItemSummary(records, nameField) {
   const map = {};
   records.forEach(r => {
@@ -254,7 +258,25 @@ app.post('/api/login', async(req,res)=>{
 });
 
 app.get('/api/stock', async(req,res)=>res.json(await Stock.find()));
-app.post('/api/stock', async(req,res)=>res.json(await Stock.create(req.body)));
+app.post('/api/stock', async(req,res)=>{
+  try {
+    const body = { ...req.body };
+    const category = body.category || '';
+    const existing = await Stock.findOne({
+      name: { $regex: `^${escapeRegex(String(body.name || '').trim())}$`, $options: 'i' },
+      unit: body.unit || 'nos',
+      ...(category ? { category } : { $or: [{ category: '' }, { category: { $exists: false } }] })
+    });
+    if (existing) {
+      existing.quantity = (+(existing.quantity) || 0) + (+(body.quantity) || 0);
+      existing.minStock = body.minStock ?? existing.minStock;
+      existing.price = body.price ?? existing.price;
+      await existing.save();
+      return res.json(existing);
+    }
+    res.json(await Stock.create(body));
+  } catch(e) { res.status(400).json({ message: e.message }); }
+});
 app.put('/api/stock/:id', async(req,res)=>res.json(await Stock.findByIdAndUpdate(req.params.id,req.body,{new:true})));
 app.delete('/api/stock/:id', async(req,res)=>{await Stock.findByIdAndDelete(req.params.id);res.json({ok:true});});
 
@@ -614,17 +636,31 @@ function stockKeyFromProduction(itemName, color, category) {
   return cat ? `${cat} - ${item}` : item;
 }
 
+function stockCandidateNames(itemName, color, category) {
+  return [...new Set([
+    stockKeyFromProduction(itemName, color, category),
+    stockKeyFromProduction(itemName, color, ''),
+    String(itemName || '').trim()
+  ].filter(Boolean))];
+}
+
+async function findStockCandidates({ itemName, product, color, category, itemId }) {
+  const name = itemName || product;
+  const names = stockCandidateNames(name, color, category);
+  const filters = [];
+  if (itemId) filters.push({ itemId: String(itemId) });
+  filters.push({ name: { $in: names } });
+  if (category) filters.push({ category, name: { $in: names } });
+  return Stock.find({ $or: filters }).sort({ itemId: -1, category: -1, createdAt: 1 });
+}
+
 async function updateStockFromProduction(production) {
   const { itemName, producedQty, unit, unitType, color, category, itemId, shape, size, thickness } = production || {};
   const qty = +(producedQty) || 0;
   if (!itemName || !qty) return null;
   const stockName = stockKeyFromProduction(itemName, color, category);
-  const exactFilter = itemId
-    ? { itemId: String(itemId), category: category || '' }
-    : { name: stockName, category: category || '' };
-  let stock = await Stock.findOne(exactFilter);
-  if (!stock) stock = await Stock.findOne({ name: stockName });
-  if (!stock && !category) stock = await Stock.findOne({ name: itemName });
+  const candidates = await findStockCandidates({ itemName, color, category, itemId });
+  let stock = candidates[0];
   if (stock) {
     stock.quantity = (+(stock.quantity) || 0) + qty;
     stock.name = stock.name || stockName;
@@ -652,30 +688,39 @@ async function adjustStockFromSale(sale, direction = -1) {
   if (!itemName || !qty) return null;
   const category = sale?.category || '';
   const stockName = stockKeyFromProduction(itemName, sale?.color, category);
-  const exactFilter = sale?.itemId
-    ? { itemId: String(sale.itemId), category }
-    : { name: stockName, category };
-  let stock = await Stock.findOne(exactFilter);
-  if (!stock) stock = await Stock.findOne({ name: stockName });
-  if (!stock && !category) stock = await Stock.findOne({ name: itemName });
-  if (stock) {
-    stock.quantity = (+(stock.quantity) || 0) + qty;
-    stock.category = stock.category || category;
-    stock.itemId = stock.itemId || sale?.itemId || '';
-    stock.shape = stock.shape || sale?.shape || '';
-    stock.color = stock.color || sale?.color || '';
-    stock.size = stock.size || sale?.size || '';
-    stock.thickness = stock.thickness || sale?.thickness || '';
-    if (sale?.unit) stock.unit = sale.unit;
-    await stock.save();
+  const candidates = await findStockCandidates({ itemName, color: sale?.color, category, itemId: sale?.itemId });
+  if (candidates.length) {
+    let remaining = Math.abs(qty);
+    for (const stock of candidates) {
+      if (remaining <= 0) break;
+      const current = +(stock.quantity) || 0;
+      const change = qty < 0 ? -Math.min(current, remaining) : remaining;
+      stock.quantity = current + change;
+      remaining -= Math.abs(change);
+      stock.category = stock.category || category;
+      stock.itemId = stock.itemId || sale?.itemId || '';
+      stock.shape = stock.shape || sale?.shape || '';
+      stock.color = stock.color || sale?.color || '';
+      stock.size = stock.size || sale?.size || '';
+      stock.thickness = stock.thickness || sale?.thickness || '';
+      if (sale?.unit) stock.unit = sale.unit;
+      await stock.save();
+      if (qty > 0) break;
+    }
+    if (qty < 0 && remaining > 0) {
+      const stock = candidates[0];
+      stock.quantity = (+(stock.quantity) || 0) - remaining;
+      await stock.save();
+    }
+    return candidates[0];
   } else {
-    stock = await Stock.create({
+    const stock = await Stock.create({
       name: stockName, category, itemId: sale?.itemId || '',
       shape: sale?.shape || '', color: sale?.color || '', size: sale?.size || '', thickness: sale?.thickness || '',
       quantity: qty, unit: sale?.unit || 'sqft', minStock: 0, price: +(sale?.price || 0) || 0
     });
+    return stock;
   }
-  return stock;
 }
 
 async function syncWorkerTotals(workerName) {
