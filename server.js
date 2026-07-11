@@ -589,7 +589,7 @@ async function validateSiteWorkAssignedWorkers(site) {
   return null;
 }
 
-async function stockKeyFromProduction(itemName, color) {
+function stockKeyFromProduction(itemName, color) {
   const name = String(itemName || '').trim();
   const col = String(color || '').trim();
   return col ? `${name} (${col})` : name;
