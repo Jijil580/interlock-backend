@@ -740,7 +740,7 @@ async function buildSiteWorkerReport(workerName, filters = {}) {
       const earned = normalized.amountEarned;
       const paid = normalized.paymentGiven;
       const row = {
-        date: r.date, siteName: r.siteName, dutyArea: we.dutyArea || '',
+        date: r.date, workerName, siteName: r.siteName, dutyArea: we.dutyArea || '',
         workDone: we.workDone || '', workCategory: we.workCategory || '',
         workArea: normalized.workArea, unit: we.unit || '', rate: normalized.rate,
         amountEarned: earned, paymentGiven: paid,
@@ -874,9 +874,9 @@ app.get('/api/workers/reports/production', async(req,res)=>{
 
 app.get('/api/workers/reports/site', async(req,res)=>{
   try {
-    const { name, fromDate, toDate, date, site, role, userName } = req.query;
+    const { name, fromDate, toDate, date, site, item, role, userName } = req.query;
     if (!name) return res.status(400).json({ message: 'Worker name required' });
-    res.json(await buildSiteWorkerReport(name, { fromDate, toDate, date, site, viewerRole: role, viewerName: userName }));
+    res.json(await buildSiteWorkerReport(name, { fromDate, toDate, date, site, item, viewerRole: role, viewerName: userName }));
   } catch(e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -903,9 +903,9 @@ app.get('/api/workers/reports/production-list', async(req,res)=>{
 app.get('/api/workers/reports/site-list', async(req,res)=>{
   try {
     const workers = await Worker.find().sort({ name: 1 });
-    const { fromDate, toDate, date, site } = req.query;
+    const { fromDate, toDate, date, site, item, role, userName } = req.query;
     const list = await Promise.all(workers.map(async w => {
-      const r = await buildSiteWorkerReport(w.name, { fromDate, toDate, date, site });
+      const r = await buildSiteWorkerReport(w.name, { fromDate, toDate, date, site, item, viewerRole: role, viewerName: userName });
       return { name: w.name, ...r.worker };
     }));
     res.json(list.filter(w => w.totalEarnings > 0 || w.totalPaid > 0));
