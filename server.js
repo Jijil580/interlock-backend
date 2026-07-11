@@ -17,10 +17,10 @@ const RawMaterialSchema = new mongoose.Schema({ name:String, material:String, su
 const ProductionSchema = new mongoose.Schema({ date:String, product:String, shift:String, target:Number, produced:Number, machine:String, supervisor:String, status:{type:String,default:'pending'}, notes:String, note:String, company:String }, {timestamps:true});
 const SalesSchema = new mongoose.Schema({ date:String, customer:String, mobileNumber:String, address:String, product:String, interlockDetails:String, quantity:Number, unit:String, price:Number, unitPrice:Number, discount:{type:Number,default:0}, total:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, invoiceNumber:String, status:{type:String,default:'pending'}, addedBy:String, company:String }, {timestamps:true});
 const CustomerSchema = new mongoose.Schema({ mobile:{type:String,unique:true}, name:String, address:String, gstNumber:String, notes:String, totalPurchases:{type:Number,default:0}, totalSalesAmount:{type:Number,default:0}, totalDiscount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, totalQuantity:{type:Number,default:0}, company:String, addedBy:String }, {timestamps:true});
-const SiteWorkSchema = new mongoose.Schema({ customerName:String, phone:String, siteLocation:String, location:String, interlockType:String, interlockColor:String, selectedWorkers:[String], startDate:String, endDate:String, status:{type:String,default:'running'}, workUnit:String, workSize:String, ratePerUnit:String, baseWorkCost:String, extraWork:Array, extraMaterials:Array, materialCost:String, laborCost:String, totalCost:String, advancePaid:String, pendingAmount:String, paymentStatus:{type:String,default:'pending'}, paymentMode:String, note:String, addedBy:String, workStatus:String, totalAmount:Number, paidAmount:Number, company:String }, {timestamps:true});
+const SiteWorkSchema = new mongoose.Schema({ customerName:String, phone:String, siteLocation:String, location:String, interlockType:String, interlockColor:String, selectedWorkers:[String], startDate:String, endDate:String, status:{type:String,default:'running'}, workUnit:String, workSize:String, ratePerUnit:String, baseWorkCost:String, extraWork:Array, extraMaterials:Array, materialCost:String, laborCost:String, totalCost:String, payments:Array, totalReceived:Number, pendingAmount:String, paymentStatus:{type:String,default:'pending'}, paymentMode:String, note:String, addedBy:String, workStatus:String, totalAmount:Number, paidAmount:Number, company:String }, {timestamps:true});
 const WorkerReportSchema = new mongoose.Schema({ siteName:String, phoneNo:String, startingDate:String, workerName:String, totalArea:String, workingCost:String, extraWork:String, extraMaterial:String, totalWorkingArea:String, totalAmount:String, note:String, paymentMode:String, upiId:String, bankName:String, bankBranch:String, bankAccount:String, amountReceivedBy:String, materialSupply:String, materialType:String, signatures:{supervisor:Boolean,office:Boolean,admin:Boolean}, addedBy:String }, {timestamps:true});
 const DailyReportSchema = new mongoose.Schema({ date:String, siteName:String, siteId:String, siteStatus:String, workersCount:String, totalArea:String, completedToday:String, totalCompleted:String, interlockType:String, dayNotes:String, materialsUnloaded:String, materialQty:String, equipment:String, supplierName:String, materialRemarks:String, extraWorkDesc:String, extraWorkQty:String, extraWorkCost:String, extraWorkRemarks:String, workerEntries:[{workerName:String,attendance:String,dutyArea:String,workDone:String,salary:Number,amountEarned:Number,paymentGiven:Number,pending:Number,remarks:String,workCategory:String,workArea:Number,unit:String,rate:Number,paymentMode:String}], payments:Array, totalPayments:Number, totalReceived:Number, complaints:String, actionTaken:String, complaintRemarks:String, addedBy:String, newSite:String, runningSite:String, workersDetail:String, materialSupply:String, dayNote:String, expenses:String, workerPayments:[{workerName:String,amount:Number,date:String,note:String}] }, {timestamps:true});
-const WorkPlanSchema = new mongoose.Schema({ date:String, siteName:String, task:String, workers:String, materials:String, note:String, status:{type:String,default:'planned'}, fromDate:String, toDate:String, site:String, plannedWork:String, workersAllocated:String, materialsNeeded:String, estimatedCost:Number, paymentPlan:String, notes:String, addedBy:String }, {timestamps:true});
+const WorkPlanSchema = new mongoose.Schema({ date:String, siteName:String, task:String, workers:String, materials:String, note:String, status:{type:String,default:'planned'}, fromDate:String, toDate:String, site:String, plannedWork:String, supervisor:String, workersAllocated:String, materialsNeeded:String, estimatedCost:Number, paymentPlan:String, notes:String, archived:{type:Boolean,default:false}, addedBy:String }, {timestamps:true});
 const WorkerSchema = new mongoose.Schema({ name:String, phone:String, address:String, role:String, workerCategory:String, workLocationType:String, paymentType:String, customPaymentType:String, rateType:String, rateAmount:Number, totalProduction:{type:Number,default:0}, totalEarnings:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
 const WorkerPaymentSchema = new mongoose.Schema({ workerName:String, amount:Number, date:String, note:String, addedBy:String, source:String, reportDate:String }, {timestamps:true});
 const PurchaseSchema = new mongoose.Schema({ date:String, supplierName:String, supplierPhone:String, supplierMobile:String, supplierAddress:String, itemName:String, itemType:String, quantity:String, unit:String, unitPrice:String, totalAmount:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, vehicleNumber:String, vehicleType:String, driverName:String, driverPhone:String, deliveryAddress:String, note:String, addedBy:String }, {timestamps:true});
@@ -371,9 +371,23 @@ app.get('/api/customers/reports', async(req,res)=>{
   } catch(e) { res.status(500).json({ message: e.message }); }
 });
 
-app.get('/api/sitework', async(req,res)=>res.json(await SiteWork.find().sort({createdAt:-1})));
-app.post('/api/sitework', async(req,res)=>res.json(await SiteWork.create(req.body)));
-app.put('/api/sitework/:id', async(req,res)=>res.json(await SiteWork.findByIdAndUpdate(req.params.id,req.body,{new:true})));
+app.get('/api/sitework', async(req,res)=>{
+  const sites = await SiteWork.find().sort({createdAt:-1});
+  for (const site of sites) await recalcSiteFinancials(site);
+  res.json(sites);
+});
+app.post('/api/sitework', async(req,res)=>{
+  const body = { ...req.body };
+  delete body.advancePaid;
+  const site = await SiteWork.create(body);
+  res.json(await recalcSiteFinancials(site));
+});
+app.put('/api/sitework/:id', async(req,res)=>{
+  const body = { ...req.body };
+  delete body.advancePaid;
+  const site = await SiteWork.findByIdAndUpdate(req.params.id,body,{new:true});
+  res.json(await recalcSiteFinancials(site));
+});
 app.delete('/api/sitework/:id', async(req,res)=>{await SiteWork.findByIdAndDelete(req.params.id);res.json({ok:true});});
 
 app.get('/api/workerreport', async(req,res)=>res.json(await WorkerReport.find().sort({createdAt:-1})));
@@ -396,6 +410,11 @@ app.post('/api/dailyreport', async(req,res)=>{
           await syncWorkerTotals(we.workerName);
         }
       }
+    }
+    if (report.siteId) await recalcSiteFinancials(report.siteId);
+    else if (report.siteName) {
+      const site = await SiteWork.findOne({ customerName: report.siteName });
+      if (site) await recalcSiteFinancials(site);
     }
     res.json(report);
   } catch(e) { res.status(400).json({ message: e.message }); }
@@ -420,11 +439,30 @@ app.put('/api/dailyreport/:id', async(req,res)=>{
     for (const name of workersToSync) {
       await syncWorkerTotals(name);
     }
+    const siteIds = new Set();
+    [oldReport, newReport].forEach(r => {
+      if (r?.siteId) siteIds.add(String(r.siteId));
+      else if (r?.siteName) siteIds.add(`name:${r.siteName}`);
+    });
+    for (const key of siteIds) {
+      if (key.startsWith('name:')) {
+        const site = await SiteWork.findOne({ customerName: key.slice(5) });
+        if (site) await recalcSiteFinancials(site);
+      } else await recalcSiteFinancials(key);
+    }
     res.json(newReport);
   } catch(e) { res.status(400).json({ message: e.message }); }
 });
 
-app.get('/api/workplan', async(req,res)=>res.json(await WorkPlan.find().sort({createdAt:-1})));
+app.get('/api/workplan', async(req,res)=>{
+  const { archive, role } = req.query;
+  const cutoff = currentPlanningWindow();
+  if (archive === 'true') {
+    if (role !== 'admin') return res.status(403).json({ message: 'Archive visible only to Admin' });
+    return res.json(await WorkPlan.find({ $or: [{ archived: true }, { date: { $lt: cutoff } }] }).sort({date:-1, createdAt:-1}));
+  }
+  res.json(await WorkPlan.find({ archived: { $ne: true }, $or: [{ date: { $gte: cutoff } }, { date: '' }, { date: null }] }).sort({date:-1, createdAt:-1}));
+});
 app.post('/api/workplan', async(req,res)=>res.json(await WorkPlan.create(req.body)));
 app.put('/api/workplan/:id', async(req,res)=>res.json(await WorkPlan.findByIdAndUpdate(req.params.id,req.body,{new:true})));
 
@@ -818,6 +856,47 @@ app.post('/api/purchases', async(req,res)=>{
 });
 
 const masterModels = {interlock:MasterInterlock,materials:MasterMaterial,labor:MasterLabor,extrawork:MasterExtraWork};
+
+function siteCostOf(site) {
+  return +(site?.totalCost || site?.totalAmount || 0);
+}
+
+function siteWorkPaymentsOf(site) {
+  const payments = Array.isArray(site?.payments) ? site.payments : [];
+  const paymentHistory = payments.reduce((sum, p) => sum + (+(p.amount) || 0), 0);
+  return paymentHistory || +(site?.totalReceived || site?.paidAmount || 0);
+}
+
+async function getDailySitePayments(site) {
+  if (!site) return 0;
+  const reports = await DailyReport.find({
+    $or: [{ siteName: site.customerName }, { siteId: String(site._id) }]
+  }).lean();
+  return reports.reduce((sum, report) => sum + (report.payments || []).reduce((inner, p) => {
+    const type = paymentKind(p.type);
+    return inner + ((type === 'site payment received' || type === 'client payment received') ? (+(p.amount) || 0) : 0);
+  }, 0), 0);
+}
+
+async function recalcSiteFinancials(siteOrId) {
+  const site = typeof siteOrId === 'string' ? await SiteWork.findById(siteOrId) : siteOrId;
+  if (!site) return null;
+  const totalReceived = siteWorkPaymentsOf(site) + await getDailySitePayments(site);
+  const pendingAmount = Math.max(0, siteCostOf(site) - totalReceived);
+  const paymentStatus = pendingAmount === 0 && siteCostOf(site) > 0 ? 'paid' : totalReceived > 0 ? 'partial' : 'pending';
+  site.totalReceived = totalReceived;
+  site.paidAmount = totalReceived;
+  site.pendingAmount = String(pendingAmount);
+  site.paymentStatus = paymentStatus;
+  await site.save();
+  return site;
+}
+
+function currentPlanningWindow() {
+  const now = new Date();
+  const firstPrevious = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  return `${firstPrevious.getFullYear()}-${String(firstPrevious.getMonth() + 1).padStart(2, '0')}-01`;
+}
 ['interlock','materials','labor','extrawork'].forEach(type=>{
   const Model = masterModels[type];
   app.get(`/api/masterdata/${type}`, async(req,res)=>res.json(await Model.find()));
@@ -1013,6 +1092,7 @@ function cashFlowRow(map, date, person, personRole) {
       workerPayments: 0, vehicleCharges: 0, materialPayments: 0,
       equipmentPayments: 0, purchasePayments: 0, otherExpenses: 0,
       totalExpenses: 0, netBalance: 0,
+      receivedDetails: [], spentDetails: [], salesDetails: [], purchaseDetails: [],
     };
   }
   return map[key];
@@ -1041,22 +1121,39 @@ app.get('/api/cashflow', async(req,res)=>{
 
     if (role === 'admin' ? personRole !== 'user' : role === 'supervisor') {
       const reportFilter = role === 'admin' ? { addedBy: { $in: namesFor('supervisor') } } : { ...ownerFilter };
+      const siteFilter = role === 'admin' ? { addedBy: { $in: namesFor('supervisor') } } : { ...ownerFilter };
       if (date) reportFilter.date = date;
       const reports = await DailyReport.find(reportFilter).lean();
+      const sites = await SiteWork.find(siteFilter).lean();
+      sites.forEach(site => {
+        const owner = site.addedBy || 'Unknown';
+        (site.payments || []).forEach(payment => {
+          if (date && ((fromDate && payment.date < fromDate) || (toDate && payment.date > toDate))) return;
+          const amount = +(payment.amount) || 0;
+          const row = cashFlowRow(rows, payment.date || site.startDate || '', owner, 'supervisor');
+          row.received += amount;
+          row.receivedDetails.push({ date: payment.date || site.startDate || '', site: site.customerName, source: 'Site Work', amount, paymentMode: payment.mode || site.paymentMode || '' });
+        });
+      });
       reports.forEach(report => {
         const owner = report.addedBy || 'Unknown';
         const row = cashFlowRow(rows, report.date || '', owner, 'supervisor');
         (report.workerEntries || []).forEach(worker => {
-          row.workerPayments += +(worker.paymentGiven) || 0;
+          const amount = +(worker.paymentGiven) || 0;
+          row.workerPayments += amount;
+          if (amount > 0) row.spentDetails.push({ date: report.date, type: 'Worker Payment', details: `${worker.workerName || 'Worker'} ${worker.workCategory || ''}`.trim(), amount });
         });
         (report.payments || []).forEach(payment => {
           const amount = +(payment.amount) || 0;
           const kind = paymentKind(payment.type);
-          if (kind === 'site payment received' || kind === 'client payment received') row.received += amount;
-          else if (kind.includes('vehicle')) row.vehicleCharges += amount;
-          else if (kind === 'material payment') row.materialPayments += amount;
-          else if (kind === 'equipment payment') row.equipmentPayments += amount;
-          else if (kind === 'other expense') row.otherExpenses += amount;
+          if (kind === 'site payment received' || kind === 'client payment received') {
+            row.received += amount;
+            row.receivedDetails.push({ date: report.date, site: report.siteName, source: 'Supervisor Daily Report', amount, paymentMode: payment.mode || '' });
+          }
+          else if (kind.includes('vehicle')) { row.vehicleCharges += amount; row.spentDetails.push({ date: report.date, type: 'Vehicle Charge', details: payment.expenseName || payment.remarks || payment.paidTo || 'Vehicle Charge', amount }); }
+          else if (kind === 'material payment') { row.materialPayments += amount; row.spentDetails.push({ date: report.date, type: 'Material Payment', details: payment.materialName || payment.supplierName || payment.remarks || 'Material Payment', amount }); }
+          else if (kind === 'equipment payment') { row.equipmentPayments += amount; row.spentDetails.push({ date: report.date, type: 'Equipment Payment', details: payment.equipmentName || payment.remarks || 'Equipment Payment', amount }); }
+          else if (kind === 'other expense') { row.otherExpenses += amount; row.spentDetails.push({ date: report.date, type: 'Other Expense', details: payment.expenseName || payment.remarks || 'Other Expense', amount }); }
         });
       });
     }
@@ -1082,11 +1179,13 @@ app.get('/api/cashflow', async(req,res)=>{
         row.salesAmount += +(sale.total) || 0;
         row.customerPayments += +(sale.amountPaid) || 0;
         row.received += +(sale.amountPaid) || 0;
+        row.salesDetails.push({ date: sale.date, customer: sale.customer, item: sale.product || sale.interlockDetails, amountReceived: +(sale.amountPaid) || 0, totalAmount: +(sale.total) || 0 });
       });
       purchases.forEach(purchase => {
         const owner = purchase.addedBy || 'Unknown';
         const row = cashFlowRow(rows, purchase.date || '', owner, 'user');
         row.purchasePayments += +(purchase.amountPaid) || 0;
+        row.purchaseDetails.push({ date: purchase.date, supplier: purchase.supplierName, material: purchase.itemName || purchase.itemType, amountPaid: +(purchase.amountPaid) || 0 });
       });
       expenseReports.forEach(report => {
         const owner = report.addedBy || 'Unknown';
@@ -1094,7 +1193,9 @@ app.get('/api/cashflow', async(req,res)=>{
           const kind = paymentKind(payment.type);
           if (kind !== 'other expense' && kind !== 'other user transaction') return;
           const row = cashFlowRow(rows, report.date || '', owner, 'user');
-          row.otherExpenses += +(payment.amount) || 0;
+          const amount = +(payment.amount) || 0;
+          row.otherExpenses += amount;
+          row.spentDetails.push({ date: report.date, type: 'Other Expense', details: payment.remarks || payment.paidTo || 'Other Expense', amount });
         });
       });
     }
