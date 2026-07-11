@@ -654,13 +654,33 @@ async function findStockCandidates({ itemName, product, color, category, itemId 
   return Stock.find({ $or: filters }).sort({ itemId: -1, category: -1, createdAt: 1 });
 }
 
+async function mergeStockCandidates(candidates, metadata = {}) {
+  if (!candidates.length) return null;
+  const primary = candidates[0];
+  const duplicates = candidates.slice(1);
+  if (duplicates.length) {
+    primary.quantity = candidates.reduce((sum, s) => sum + (+(s.quantity) || 0), 0);
+    await Stock.deleteMany({ _id: { $in: duplicates.map(s => s._id) } });
+  }
+  primary.name = metadata.name || primary.name;
+  primary.category = primary.category || metadata.category || '';
+  primary.itemId = primary.itemId || metadata.itemId || '';
+  primary.shape = primary.shape || metadata.shape || '';
+  primary.color = primary.color || metadata.color || '';
+  primary.size = primary.size || metadata.size || '';
+  primary.thickness = primary.thickness || metadata.thickness || '';
+  if (metadata.unit) primary.unit = metadata.unit;
+  await primary.save();
+  return primary;
+}
+
 async function updateStockFromProduction(production) {
   const { itemName, producedQty, unit, unitType, color, category, itemId, shape, size, thickness } = production || {};
   const qty = +(producedQty) || 0;
   if (!itemName || !qty) return null;
   const stockName = stockKeyFromProduction(itemName, color, category);
   const candidates = await findStockCandidates({ itemName, color, category, itemId });
-  let stock = candidates[0];
+  let stock = await mergeStockCandidates(candidates, { name: stockName, category, itemId, shape, color, size, thickness, unit: unit || unitType });
   if (stock) {
     stock.quantity = (+(stock.quantity) || 0) + qty;
     stock.name = stock.name || stockName;
