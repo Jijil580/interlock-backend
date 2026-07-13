@@ -442,11 +442,6 @@ app.get('/api/dailyreport', async(req,res)=>res.json(await DailyReport.find().so
 app.post('/api/dailyreport', async(req,res)=>{
   try {
     const body = normalizeDailyReportBody(req.body);
-    const duplicate = await findDuplicateWorkerEntry(body);
-    if (duplicate) return res.status(409).json({
-      message: 'Worker work entry already exists for this date and site.',
-      existingReportId: duplicate._id
-    });
     const workerValidation = await validateDailyReportSiteWorkers(body);
     if (workerValidation) return res.status(400).json({ message: workerValidation });
     const report = await DailyReport.create(body);
@@ -469,11 +464,6 @@ app.put('/api/dailyreport/:id', async(req,res)=>{
   try {
     const oldReport = await DailyReport.findById(req.params.id);
     const body = normalizeDailyReportBody(req.body);
-    const duplicate = await findDuplicateWorkerEntry(body, req.params.id);
-    if (duplicate) return res.status(409).json({
-      message: 'Worker work entry already exists for this date and site.',
-      existingReportId: duplicate._id
-    });
     const workerValidation = await validateDailyReportSiteWorkers(body);
     if (workerValidation) return res.status(400).json({ message: workerValidation });
     const newReport = await DailyReport.findByIdAndUpdate(req.params.id,body,{new:true});
