@@ -1674,18 +1674,22 @@ app.get('/api/cashflow', async(req,res)=>{
     const accessRole = role === 'user' ? 'admin' : role;
 
     const date = cashFlowDateFilter(fromDate, toDate);
+    const requestedPersonRole = personRole || 'all';
     const people = accessRole === 'admin'
-      ? await User.find({ role: { $in: ['supervisor', 'user'] } }, 'name role').lean()
+      ? await User.find({ role: { $in: ['admin', 'supervisor', 'user'] } }, 'name role').lean()
       : [];
-    const namesFor = targetRole => people
-      .filter(user => user.role === targetRole && (!person || user.name === person))
+    const supervisorNames = people
+      .filter(user => user.role === 'supervisor' && (!person || user.name === person) && (requestedPersonRole === 'all' || requestedPersonRole === 'supervisor'))
+      .map(user => user.name);
+    const officeNames = people
+      .filter(user => ['admin', 'user'].includes(user.role) && (!person || user.name === person) && (requestedPersonRole === 'all' || requestedPersonRole === 'user' || requestedPersonRole === 'admin'))
       .map(user => user.name);
     const ownerFilter = accessRole === 'admin' ? {} : { addedBy: name };
     const rows = {};
 
-    if (accessRole === 'admin' ? personRole !== 'user' : accessRole === 'supervisor') {
-      const reportFilter = accessRole === 'admin' ? { addedBy: { $in: namesFor('supervisor') } } : { ...ownerFilter };
-      const siteFilter = accessRole === 'admin' ? { addedBy: { $in: namesFor('supervisor') } } : { ...ownerFilter };
+    if (accessRole === 'admin' ? supervisorNames.length > 0 : accessRole === 'supervisor') {
+      const reportFilter = accessRole === 'admin' ? { addedBy: { $in: supervisorNames } } : { ...ownerFilter };
+      const siteFilter = accessRole === 'admin' ? { addedBy: { $in: supervisorNames } } : { ...ownerFilter };
       if (date) reportFilter.date = date;
       const reports = await DailyReport.find(reportFilter).lean();
       const sites = await SiteWork.find(siteFilter).lean();
@@ -1731,8 +1735,8 @@ app.get('/api/cashflow', async(req,res)=>{
       });
     }
 
-    if (accessRole === 'admin' ? personRole !== 'supervisor' : accessRole === 'user') {
-      const userOwnerFilter = accessRole === 'admin' ? { addedBy: { $in: namesFor('user') } } : { ...ownerFilter };
+    if (accessRole === 'admin' ? officeNames.length > 0 : accessRole === 'user') {
+      const userOwnerFilter = accessRole === 'admin' ? { addedBy: { $in: officeNames } } : { ...ownerFilter };
       const salesFilter = { ...userOwnerFilter };
       const purchaseFilter = { ...userOwnerFilter };
       const expenseFilter = { ...userOwnerFilter };
