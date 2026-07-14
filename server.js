@@ -1390,6 +1390,80 @@ app.get('/api/productionsite/reports', async(req,res)=>{
   } catch(e) { res.status(500).json({ message: e.message }); }
 });
 
+app.get('/api/office-daily-report', async(req,res)=>{
+  try {
+    const { date, role } = req.query;
+    if (!date) return res.status(400).json({ message: 'Date is required' });
+    const accessRole = role === 'user' ? 'admin' : role;
+    if (accessRole !== 'admin') return res.status(403).json({ message: 'Office daily report is available only to Admin and User' });
+
+    await cleanupDuplicateProductionEntries();
+    const [sales, purchases, productionEntries] = await Promise.all([
+      Sales.find({ date }).sort({ createdAt: -1 }).lean(),
+      Purchase.find({ date }).sort({ createdAt: -1 }).lean(),
+      ProductionSiteEntry.find({ date, producedQty: { $exists: true, $gt: 0 } }).sort({ createdAt: -1 }).lean(),
+    ]);
+
+    const productionItemMap = {};
+    productionEntries.forEach(entry => {
+      const item = entry.itemName || entry.category || 'Other';
+      const color = entry.color || '';
+      const category = entry.category || '';
+      const unit = entry.unit || entry.unitType || '';
+      const key = [item, category, color, unit].join('|');
+      if (!productionItemMap[key]) {
+        productionItemMap[key] = { item, category, color, unit, quantity: 0, amount: 0, paid: 0, pending: 0 };
+      }
+      productionItemMap[key].quantity += +(entry.producedQty) || 0;
+      productionItemMap[key].amount += +(entry.totalAmount) || 0;
+      productionItemMap[key].paid += +(entry.paymentGiven) || 0;
+      productionItemMap[key].pending += +(entry.amountPending ?? ((+(entry.totalAmount) || 0) - (+(entry.paymentGiven) || 0))) || 0;
+    });
+
+    const totals = {
+      salesCount: sales.length,
+      salesAmount: sales.reduce((sum, sale) => sum + (+(sale.total) || 0), 0),
+      salesReceived: sales.reduce((sum, sale) => sum + (+(sale.amountPaid) || 0), 0),
+      salesPending: sales.reduce((sum, sale) => sum + (+(sale.amountPending) || 0), 0),
+      purchaseCount: purchases.length,
+      purchaseAmount: purchases.reduce((sum, purchase) => sum + (+(purchase.totalAmount) || 0), 0),
+      purchasePaid: purchases.reduce((sum, purchase) => sum + (+(purchase.amountPaid) || 0), 0),
+      purchasePending: purchases.reduce((sum, purchase) => sum + (+(purchase.amountPending) || 0), 0),
+      productionCount: productionEntries.length,
+      productionQuantity: productionEntries.reduce((sum, entry) => sum + (+(entry.producedQty) || 0), 0),
+      productionEarnings: productionEntries.reduce((sum, entry) => sum + (+(entry.totalAmount) || 0), 0),
+      productionPayments: productionEntries.reduce((sum, entry) => sum + (+(entry.paymentGiven) || 0), 0),
+      productionPending: productionEntries.reduce((sum, entry) => sum + (+(entry.amountPending ?? ((+(entry.totalAmount) || 0) - (+(entry.paymentGiven) || 0))) || 0), 0),
+    };
+    totals.cashReceived = totals.salesReceived;
+    totals.cashPaid = totals.purchasePaid + totals.productionPayments;
+    totals.netCash = totals.cashReceived - totals.cashPaid;
+
+    res.json({
+      date,
+      totals,
+      sales,
+      purchases,
+      productionEntries,
+      productionItemSummary: Object.values(productionItemMap).sort((a,b)=>a.item.localeCompare(b.item)),
+      productionPayments: productionEntries
+        .filter(entry => (+(entry.paymentGiven) || 0) > 0)
+        .map(entry => ({
+          date: entry.date,
+          workerName: entry.workerName,
+          itemName: entry.itemName,
+          category: entry.category,
+          producedQty: entry.producedQty,
+          unit: entry.unit || entry.unitType || '',
+          amount: +(entry.paymentGiven) || 0,
+          earned: +(entry.totalAmount) || 0,
+          pending: +(entry.amountPending ?? ((+(entry.totalAmount) || 0) - (+(entry.paymentGiven) || 0))) || 0,
+          remarks: entry.remarks || '',
+        })),
+    });
+  } catch(e) { res.status(500).json({ message: e.message }); }
+});
+
 
 // Device Management
 const DeviceSchema = new mongoose.Schema({
