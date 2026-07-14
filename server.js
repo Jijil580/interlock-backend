@@ -29,7 +29,7 @@ const MasterDataSchema = new mongoose.Schema({ name:String, category:String, sha
 const ProductionSiteSchema = new mongoose.Schema({
   date:String, shift:String, workerId:String, workerName:String,
   itemId:String, itemName:String, category:String, shape:String, color:String, size:String, thickness:String, unitType:String,
-  producedQty:Number, unit:String, productionRate:Number, totalAmount:Number,
+  producedQty:Number, sqftPerPiece:Number, sqftQty:Number, unit:String, productionRate:Number, totalAmount:Number,
   paymentGiven:Number, amountPending:Number, remarks:String,
   workType:String, notes:String, attendance:Array, totalCost:Number, addedBy:String,
   dedupeKey:String,
@@ -924,12 +924,15 @@ async function buildProductionWorkerReport(workerName, filters = {}) {
   const itemMap = {};
   productions.forEach(p => {
     const key = p.itemName || 'Other';
-    if (!itemMap[key]) itemMap[key] = { item: key, quantity: 0, unit: p.unit || p.unitType || '' };
+    const sqftQty = +(p.sqftQty || 0) || ((+(p.producedQty) || 0) * (+(p.sqftPerPiece) || 0));
+    if (!itemMap[key]) itemMap[key] = { item: key, quantity: 0, sqftQty: 0, unit: p.unit || p.unitType || '' };
     itemMap[key].quantity += +(p.producedQty) || 0;
+    itemMap[key].sqftQty += sqftQty;
     if (p.unit) itemMap[key].unit = p.unit;
   });
 
   const totalQuantity = productions.reduce((a, p) => a + (+(p.producedQty) || 0), 0);
+  const totalSqft = productions.reduce((a, p) => a + (+(p.sqftQty || 0) || ((+(p.producedQty) || 0) * (+(p.sqftPerPiece) || 0))), 0);
   const totalEarnings = productions.reduce((a, p) => a + (+(p.totalAmount) || 0), 0);
   const totalPaid = productions.reduce((a, p) => a + (+(p.paymentGiven) || 0), 0);
 
@@ -940,6 +943,7 @@ async function buildProductionWorkerReport(workerName, filters = {}) {
       role: worker?.role || '',
       phone: worker?.phone || '',
       totalQuantity,
+      totalSqft,
       totalEarnings,
       totalPaid,
       totalPending: Math.max(0, totalEarnings - totalPaid),
@@ -947,7 +951,7 @@ async function buildProductionWorkerReport(workerName, filters = {}) {
     itemSummary: Object.values(itemMap),
     history: productions.map(p => ({
       _id: p._id, date: p.date, item: p.itemName, color: p.color || '',
-      qty: p.producedQty, unit: p.unit || p.unitType || '',
+      qty: p.producedQty, sqftPerPiece: p.sqftPerPiece, sqftQty: +(p.sqftQty || 0) || ((+(p.producedQty) || 0) * (+(p.sqftPerPiece) || 0)), unit: p.unit || p.unitType || '',
       rate: p.productionRate, amount: p.totalAmount, paid: +(p.paymentGiven) || 0,
       pending: Math.max(0, (+(p.totalAmount) || 0) - (+(p.paymentGiven) || 0)),
     })),
@@ -1333,6 +1337,9 @@ app.post("/api/productionsite", async(req,res)=>{
         return res.status(400).json({ message: 'Select an active production worker' });
       }
       const producedQty = +(body.producedQty) || 0;
+      const master = body.itemId ? await MasterInterlock.findById(body.itemId).lean().catch(()=>null) : null;
+      const sqftPerPiece = +(body.sqftPerPiece ?? master?.sqftPerPiece ?? 0) || 0;
+      const sqftQty = +(body.sqftQty ?? (producedQty * sqftPerPiece)) || 0;
       const productionRate = +(body.productionRate) || 0;
       if (!producedQty) return res.status(400).json({ message: 'Produced quantity is required' });
       if (!productionRate) return res.status(400).json({ message: 'Rate per unit must be entered manually' });
@@ -1340,7 +1347,7 @@ app.post("/api/productionsite", async(req,res)=>{
       const paymentGiven = +(body.paymentGiven) || 0;
       const amountPending = Math.max(0, totalAmount - paymentGiven);
       const entryData = {
-        ...body, producedQty, productionRate, totalAmount, paymentGiven, amountPending,
+        ...body, producedQty, sqftPerPiece, sqftQty, productionRate, totalAmount, paymentGiven, amountPending,
       };
       entryData.dedupeKey = productionDedupeKey(entryData);
       const duplicate = await ProductionSiteEntry.findOne({
@@ -1359,7 +1366,7 @@ app.post("/api/productionsite", async(req,res)=>{
         }
         throw err;
       }
-      await updateStockFromProduction({ ...body, producedQty });
+      await updateStockFromProduction({ ...body, producedQty, sqftPerPiece, sqftQty });
       await syncWorkerTotals(body.workerName);
       if (paymentGiven > 0) {
         await recordWorkerPayment(body.workerName, paymentGiven, body.date, 'production', body.addedBy, `Production: ${body.itemName}`);
@@ -1387,8 +1394,10 @@ app.get('/api/productionsite/reports', async(req,res)=>{
 
     const workerMap = {};
     entries.forEach(e => {
-      if (!workerMap[e.workerName]) workerMap[e.workerName] = { worker: e.workerName, quantity: 0, earnings: 0, paid: 0 };
+      const sqftQty = +(e.sqftQty || 0) || ((+(e.producedQty) || 0) * (+(e.sqftPerPiece) || 0));
+      if (!workerMap[e.workerName]) workerMap[e.workerName] = { worker: e.workerName, quantity: 0, sqftQty: 0, earnings: 0, paid: 0 };
       workerMap[e.workerName].quantity += +(e.producedQty) || 0;
+      workerMap[e.workerName].sqftQty += sqftQty;
       workerMap[e.workerName].earnings += +(e.totalAmount) || 0;
       workerMap[e.workerName].paid += +(e.paymentGiven) || 0;
     });
@@ -1396,13 +1405,16 @@ app.get('/api/productionsite/reports', async(req,res)=>{
     const itemMap = {};
     const colorMap = {};
     entries.forEach(e => {
+      const sqftQty = +(e.sqftQty || 0) || ((+(e.producedQty) || 0) * (+(e.sqftPerPiece) || 0));
       const ik = e.itemName || 'Other';
-      if (!itemMap[ik]) itemMap[ik] = { item: ik, quantity: 0, unit: e.unit || '', amount: 0 };
+      if (!itemMap[ik]) itemMap[ik] = { item: ik, quantity: 0, sqftQty: 0, unit: e.unit || '', amount: 0 };
       itemMap[ik].quantity += +(e.producedQty) || 0;
+      itemMap[ik].sqftQty += sqftQty;
       itemMap[ik].amount += +(e.totalAmount) || 0;
       const ck = e.color || 'Other';
-      if (!colorMap[ck]) colorMap[ck] = { color: ck, quantity: 0, amount: 0 };
+      if (!colorMap[ck]) colorMap[ck] = { color: ck, quantity: 0, sqftQty: 0, amount: 0 };
       colorMap[ck].quantity += +(e.producedQty) || 0;
+      colorMap[ck].sqftQty += sqftQty;
       colorMap[ck].amount += +(e.totalAmount) || 0;
     });
 
@@ -1414,6 +1426,7 @@ app.get('/api/productionsite/reports', async(req,res)=>{
     res.json({
       totalEntries: entries.length,
       totalQuantity: entries.reduce((a, e) => a + (+(e.producedQty) || 0), 0),
+      totalSqft: entries.reduce((a, e) => a + (+(e.sqftQty || 0) || ((+(e.producedQty) || 0) * (+(e.sqftPerPiece) || 0))), 0),
       totalAmount: entries.reduce((a, e) => a + (+(e.totalAmount) || 0), 0),
       workerWise: Object.values(workerMap),
       itemWise: Object.values(itemMap),
@@ -1444,11 +1457,13 @@ app.get('/api/office-daily-report', async(req,res)=>{
       const color = entry.color || '';
       const category = entry.category || '';
       const unit = entry.unit || entry.unitType || '';
+      const sqftQty = +(entry.sqftQty || 0) || ((+(entry.producedQty) || 0) * (+(entry.sqftPerPiece) || 0));
       const key = [item, category, color, unit].join('|');
       if (!productionItemMap[key]) {
-        productionItemMap[key] = { item, category, color, unit, quantity: 0, amount: 0, paid: 0, pending: 0 };
+        productionItemMap[key] = { item, category, color, unit, quantity: 0, sqftQty: 0, amount: 0, paid: 0, pending: 0 };
       }
       productionItemMap[key].quantity += +(entry.producedQty) || 0;
+      productionItemMap[key].sqftQty += sqftQty;
       productionItemMap[key].amount += +(entry.totalAmount) || 0;
       productionItemMap[key].paid += +(entry.paymentGiven) || 0;
       productionItemMap[key].pending += +(entry.amountPending ?? ((+(entry.totalAmount) || 0) - (+(entry.paymentGiven) || 0))) || 0;
@@ -1465,6 +1480,7 @@ app.get('/api/office-daily-report', async(req,res)=>{
       purchasePending: purchases.reduce((sum, purchase) => sum + (+(purchase.amountPending) || 0), 0),
       productionCount: productionEntries.length,
       productionQuantity: productionEntries.reduce((sum, entry) => sum + (+(entry.producedQty) || 0), 0),
+      productionSqft: productionEntries.reduce((sum, entry) => sum + (+(entry.sqftQty || 0) || ((+(entry.producedQty) || 0) * (+(entry.sqftPerPiece) || 0))), 0),
       productionEarnings: productionEntries.reduce((sum, entry) => sum + (+(entry.totalAmount) || 0), 0),
       productionPayments: productionEntries.reduce((sum, entry) => sum + (+(entry.paymentGiven) || 0), 0),
       productionPending: productionEntries.reduce((sum, entry) => sum + (+(entry.amountPending ?? ((+(entry.totalAmount) || 0) - (+(entry.paymentGiven) || 0))) || 0), 0),
@@ -1488,6 +1504,8 @@ app.get('/api/office-daily-report', async(req,res)=>{
           itemName: entry.itemName,
           category: entry.category,
           producedQty: entry.producedQty,
+          sqftPerPiece: entry.sqftPerPiece,
+          sqftQty: +(entry.sqftQty || 0) || ((+(entry.producedQty) || 0) * (+(entry.sqftPerPiece) || 0)),
           unit: entry.unit || entry.unitType || '',
           amount: +(entry.paymentGiven) || 0,
           earned: +(entry.totalAmount) || 0,
@@ -1550,9 +1568,11 @@ app.get('/api/dashboard-summary', async(req,res)=>{
       const item = entry.itemName || entry.category || 'Other';
       const color = entry.color || '';
       const unit = entry.unit || entry.unitType || '';
+      const sqftQty = +(entry.sqftQty || 0) || ((+(entry.producedQty) || 0) * (+(entry.sqftPerPiece) || 0));
       const key = [item, color, unit].join('|');
-      if (!productionItemMap[key]) productionItemMap[key] = { item, color, unit, quantity: 0, amount: 0 };
+      if (!productionItemMap[key]) productionItemMap[key] = { item, color, unit, quantity: 0, sqftQty: 0, amount: 0 };
       productionItemMap[key].quantity += +(entry.producedQty) || 0;
+      productionItemMap[key].sqftQty += sqftQty;
       productionItemMap[key].amount += +(entry.totalAmount) || 0;
     });
 
@@ -1567,6 +1587,7 @@ app.get('/api/dashboard-summary', async(req,res)=>{
       purchasePending: purchases.reduce((sum, purchase) => sum + (+(purchase.amountPending) || 0), 0),
       productionCount: productionEntries.length,
       productionQuantity: productionEntries.reduce((sum, entry) => sum + (+(entry.producedQty) || 0), 0),
+      productionSqft: productionEntries.reduce((sum, entry) => sum + (+(entry.sqftQty || 0) || ((+(entry.producedQty) || 0) * (+(entry.sqftPerPiece) || 0))), 0),
       productionValue: productionEntries.reduce((sum, entry) => sum + (+(entry.totalAmount) || 0), 0),
       productionPaid: productionEntries.reduce((sum, entry) => sum + (+(entry.paymentGiven) || 0), 0),
       productionPending: productionEntries.reduce((sum, entry) => sum + (+(entry.amountPending ?? ((+(entry.totalAmount) || 0) - (+(entry.paymentGiven) || 0))) || 0), 0),
