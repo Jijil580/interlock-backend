@@ -1441,7 +1441,7 @@ app.get('/api/office-daily-report', async(req,res)=>{
   try {
     const { date, role } = req.query;
     if (!date) return res.status(400).json({ message: 'Date is required' });
-    const accessRole = role === 'user' ? 'admin' : role;
+    const accessRole = role;
     if (accessRole !== 'admin') return res.status(403).json({ message: 'Office daily report is available only to Admin and User' });
 
     await cleanupDuplicateProductionEntries();
@@ -1739,15 +1739,18 @@ app.get('/api/cashflow', async(req,res)=>{
       const userOwnerFilter = accessRole === 'admin' ? { addedBy: { $in: officeNames } } : { ...ownerFilter };
       const salesFilter = { ...userOwnerFilter };
       const purchaseFilter = { ...userOwnerFilter };
+      const productionFilter = { ...userOwnerFilter, producedQty: { $exists: true, $gt: 0 } };
       const expenseFilter = { ...userOwnerFilter };
       if (date) {
         salesFilter.date = date;
         purchaseFilter.date = date;
+        productionFilter.date = date;
         expenseFilter.date = date;
       }
-      const [sales, purchases, expenseReports] = await Promise.all([
+      const [sales, purchases, productionEntries, expenseReports] = await Promise.all([
         Sales.find(salesFilter).lean(),
         Purchase.find(purchaseFilter).lean(),
+        ProductionSiteEntry.find(productionFilter).lean(),
         DailyReport.find(expenseFilter).lean(),
       ]);
       sales.forEach(sale => {
@@ -1764,6 +1767,14 @@ app.get('/api/cashflow', async(req,res)=>{
         row.purchasePayments += +(purchase.amountPaid) || 0;
         row.purchaseDetails.push({ date: purchase.date, supplier: purchase.supplierName, material: purchase.itemName || purchase.itemType, amountPaid: +(purchase.amountPaid) || 0 });
       });
+      productionEntries.forEach(entry => {
+        const amount = +(entry.paymentGiven) || 0;
+        if (amount <= 0) return;
+        const owner = entry.addedBy || 'Unknown';
+        const row = cashFlowRow(rows, entry.date || '', owner, 'user');
+        row.workerPayments += amount;
+        row.spentDetails.push({ date: entry.date, type: 'Production Worker Payment', details: `${entry.workerName || 'Worker'} ${entry.itemName || entry.category || ''}`.trim(), amount });
+      });
       expenseReports.forEach(report => {
         const owner = report.addedBy || 'Unknown';
         (report.payments || []).forEach(payment => {
@@ -1779,7 +1790,7 @@ app.get('/api/cashflow', async(req,res)=>{
 
     const history = Object.values(rows).map(row => {
       const supervisorExpenses = row.workerPayments + row.vehicleCharges + row.materialPayments + row.equipmentPayments + row.otherExpenses;
-      const userExpenses = row.purchasePayments + row.otherExpenses;
+      const userExpenses = row.purchasePayments + row.workerPayments + row.otherExpenses;
       row.totalExpenses = row.personRole === 'supervisor' ? supervisorExpenses : userExpenses;
       row.netBalance = row.received - row.totalExpenses;
       return row;
