@@ -1464,6 +1464,104 @@ app.get('/api/office-daily-report', async(req,res)=>{
   } catch(e) { res.status(500).json({ message: e.message }); }
 });
 
+function inDateRange(value, fromDate, toDate) {
+  if (!value) return false;
+  if (fromDate && value < fromDate) return false;
+  if (toDate && value > toDate) return false;
+  return true;
+}
+
+app.get('/api/dashboard-summary', async(req,res)=>{
+  try {
+    const { role, fromDate, toDate } = req.query;
+    const accessRole = role === 'user' ? 'admin' : role;
+    if (accessRole !== 'admin') return res.status(403).json({ message: 'Dashboard summary is available only to Admin and User' });
+
+    await cleanupDuplicateProductionEntries();
+    const dateFilter = {};
+    if (fromDate || toDate) {
+      dateFilter.date = {};
+      if (fromDate) dateFilter.date.$gte = fromDate;
+      if (toDate) dateFilter.date.$lte = toDate;
+    }
+
+    const [sales, purchases, productionEntries, sites, dailyReports, stock] = await Promise.all([
+      Sales.find(dateFilter).sort({ createdAt: -1 }).lean(),
+      Purchase.find(dateFilter).sort({ createdAt: -1 }).lean(),
+      ProductionSiteEntry.find({ ...dateFilter, producedQty: { $exists: true, $gt: 0 } }).sort({ createdAt: -1 }).lean(),
+      SiteWork.find().sort({ createdAt: -1 }).lean(),
+      DailyReport.find(dateFilter).sort({ createdAt: -1 }).lean(),
+      Stock.find().lean(),
+    ]);
+
+    const sitePayments = sites.reduce((sum, site) => {
+      const direct = (site.payments || []).reduce((inner, p) => {
+        const paymentDate = p.date || site.startDate || '';
+        return inner + (inDateRange(paymentDate, fromDate, toDate) ? (+(p.amount) || 0) : 0);
+      }, 0);
+      const legacyDate = site.startDate || site.createdAt?.toISOString?.().slice(0,10) || '';
+      const legacy = (!Array.isArray(site.payments) || site.payments.length === 0) && inDateRange(legacyDate, fromDate, toDate)
+        ? +(site.totalReceived ?? site.paidAmount ?? 0) || 0
+        : 0;
+      return sum + direct + legacy;
+    }, 0);
+
+    const dailySitePayments = dailyReports.reduce((sum, report) => sum + (report.payments || []).reduce((inner, p) => {
+      const kind = paymentKind(p.type);
+      return inner + ((kind === 'site payment received' || kind === 'client payment received') ? (+(p.amount) || 0) : 0);
+    }, 0), 0);
+
+    const productionItemMap = {};
+    productionEntries.forEach(entry => {
+      const item = entry.itemName || entry.category || 'Other';
+      const color = entry.color || '';
+      const unit = entry.unit || entry.unitType || '';
+      const key = [item, color, unit].join('|');
+      if (!productionItemMap[key]) productionItemMap[key] = { item, color, unit, quantity: 0, amount: 0 };
+      productionItemMap[key].quantity += +(entry.producedQty) || 0;
+      productionItemMap[key].amount += +(entry.totalAmount) || 0;
+    });
+
+    const totals = {
+      salesCount: sales.length,
+      salesAmount: sales.reduce((sum, sale) => sum + (+(sale.total) || 0), 0),
+      salesReceived: sales.reduce((sum, sale) => sum + (+(sale.amountPaid) || 0), 0),
+      salesPending: sales.reduce((sum, sale) => sum + (+(sale.amountPending) || 0), 0),
+      purchaseCount: purchases.length,
+      purchaseAmount: purchases.reduce((sum, purchase) => sum + (+(purchase.totalAmount) || 0), 0),
+      purchasePaid: purchases.reduce((sum, purchase) => sum + (+(purchase.amountPaid) || 0), 0),
+      purchasePending: purchases.reduce((sum, purchase) => sum + (+(purchase.amountPending) || 0), 0),
+      productionCount: productionEntries.length,
+      productionQuantity: productionEntries.reduce((sum, entry) => sum + (+(entry.producedQty) || 0), 0),
+      productionValue: productionEntries.reduce((sum, entry) => sum + (+(entry.totalAmount) || 0), 0),
+      productionPaid: productionEntries.reduce((sum, entry) => sum + (+(entry.paymentGiven) || 0), 0),
+      productionPending: productionEntries.reduce((sum, entry) => sum + (+(entry.amountPending ?? ((+(entry.totalAmount) || 0) - (+(entry.paymentGiven) || 0))) || 0), 0),
+      runningSites: sites.filter(site => site.status === 'running' || site.status === 'pending').length,
+      completedSites: sites.filter(site => site.status === 'completed').length,
+      siteValue: sites.reduce((sum, site) => sum + (+(site.totalCost || site.totalAmount) || 0), 0),
+      siteReceived: sitePayments + dailySitePayments,
+      sitePending: sites.reduce((sum, site) => sum + (+(site.pendingAmount) || 0), 0),
+      stockItems: stock.length,
+      stockQuantity: stock.reduce((sum, item) => sum + (+(item.quantity) || 0), 0),
+      lowStockItems: stock.filter(item => (+(item.minStock) || 0) > 0 && (+(item.quantity) || 0) <= (+(item.minStock) || 0)).length,
+    };
+    totals.cashIn = totals.salesReceived + totals.siteReceived;
+    totals.cashOut = totals.purchasePaid + totals.productionPaid;
+    totals.netCash = totals.cashIn - totals.cashOut;
+
+    res.json({
+      fromDate: fromDate || '',
+      toDate: toDate || '',
+      totals,
+      productionItemSummary: Object.values(productionItemMap).sort((a,b)=>b.quantity-a.quantity).slice(0, 8),
+      recentSales: sales.slice(0, 5),
+      recentPurchases: purchases.slice(0, 5),
+      recentProduction: productionEntries.slice(0, 5),
+      recentSites: sites.slice(0, 5),
+    });
+  } catch(e) { res.status(500).json({ message: e.message }); }
+});
+
 
 // Device Management
 const DeviceSchema = new mongoose.Schema({
