@@ -15,7 +15,7 @@ const UserSchema = new mongoose.Schema({ name:String, username:{type:String,uniq
 const StockSchema = new mongoose.Schema({ name:String, category:String, itemId:String, shape:String, color:String, size:String, thickness:String, unit:String, quantity:Number, minStock:Number, price:Number, company:String }, {timestamps:true});
 const RawMaterialSchema = new mongoose.Schema({ name:String, material:String, supplier:String, unit:String, quantity:Number, qty:Number, price:Number, costPerUnit:Number, lastPurchase:String, company:String }, {timestamps:true});
 const ProductionSchema = new mongoose.Schema({ date:String, product:String, shift:String, target:Number, produced:Number, machine:String, supervisor:String, status:{type:String,default:'pending'}, notes:String, note:String, company:String }, {timestamps:true});
-const SalesSchema = new mongoose.Schema({ date:String, customer:String, mobileNumber:String, address:String, product:String, itemId:String, category:String, shape:String, color:String, size:String, thickness:String, interlockDetails:String, quantity:Number, unit:String, price:Number, unitPrice:Number, discount:{type:Number,default:0}, total:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, invoiceNumber:String, status:{type:String,default:'pending'}, addedBy:String, company:String }, {timestamps:true});
+const SalesSchema = new mongoose.Schema({ date:String, customer:String, mobileNumber:String, address:String, gstNumber:String, product:String, itemId:String, category:String, shape:String, color:String, size:String, thickness:String, interlockDetails:String, quantity:Number, unit:String, price:Number, unitPrice:Number, discount:{type:Number,default:0}, taxableAmount:Number, billType:String, cgstPercent:Number, sgstPercent:Number, cgstAmount:Number, sgstAmount:Number, total:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, invoiceNumber:String, status:{type:String,default:'pending'}, addedBy:String, company:String }, {timestamps:true});
 const CustomerSchema = new mongoose.Schema({ mobile:{type:String,unique:true}, name:String, address:String, gstNumber:String, notes:String, totalPurchases:{type:Number,default:0}, totalSalesAmount:{type:Number,default:0}, totalDiscount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, totalQuantity:{type:Number,default:0}, company:String, addedBy:String }, {timestamps:true});
 const SiteWorkSchema = new mongoose.Schema({ customerName:String, phone:String, siteLocation:String, location:String, interlockType:String, interlockColor:String, selectedWorkers:[String], startDate:String, endDate:String, status:{type:String,default:'running'}, workUnit:String, workSize:String, ratePerUnit:String, baseWorkCost:String, extraWork:Array, extraMaterials:Array, materialCost:String, laborCost:String, totalCost:String, payments:Array, totalReceived:Number, pendingAmount:String, paymentStatus:{type:String,default:'pending'}, paymentMode:String, note:String, addedBy:String, workStatus:String, totalAmount:Number, paidAmount:Number, company:String }, {timestamps:true});
 const WorkerReportSchema = new mongoose.Schema({ siteName:String, phoneNo:String, startingDate:String, workerName:String, totalArea:String, workingCost:String, extraWork:String, extraMaterial:String, totalWorkingArea:String, totalAmount:String, note:String, paymentMode:String, upiId:String, bankName:String, bankBranch:String, bankAccount:String, amountReceivedBy:String, materialSupply:String, materialType:String, signatures:{supervisor:Boolean,office:Boolean,admin:Boolean}, addedBy:String }, {timestamps:true});
@@ -312,12 +312,18 @@ app.post('/api/sales', async(req,res)=>{
   try {
     const mobile = normalizeMobile(req.body.mobileNumber);
     if (!mobile || mobile.length < 10) return res.status(400).json({ message: 'Valid mobile number is required' });
-    const total = +(req.body.total) || 0;
+    const taxableAmount = +(req.body.taxableAmount ?? req.body.total) || 0;
+    const cgstPercent = +(req.body.cgstPercent) || 0;
+    const sgstPercent = +(req.body.sgstPercent) || 0;
+    const cgstAmount = +(req.body.cgstAmount) || (taxableAmount * cgstPercent / 100);
+    const sgstAmount = +(req.body.sgstAmount) || (taxableAmount * sgstPercent / 100);
+    const total = +(req.body.total) || Math.max(0, taxableAmount + cgstAmount + sgstAmount);
     const discount = +(req.body.discount) || 0;
     const amountPaid = +(req.body.amountPaid) || 0;
     const amountPending = total - amountPaid;
     const status = amountPending <= 0 ? 'paid' : amountPaid > 0 ? 'partial' : 'pending';
-    const sale = await Sales.create({ ...req.body, mobileNumber: mobile, total, discount, amountPaid, amountPending, status });
+    const invoiceNumber = req.body.invoiceNumber || `INV-${Date.now().toString().slice(-8)}`;
+    const sale = await Sales.create({ ...req.body, mobileNumber: mobile, invoiceNumber, taxableAmount, cgstPercent, sgstPercent, cgstAmount, sgstAmount, total, discount, amountPaid, amountPending, status });
     await adjustStockFromSale(sale, -1);
     await upsertCustomerFromSale(sale, req.body.saveToCustomerMaster !== false);
     res.json(sale);
