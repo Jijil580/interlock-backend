@@ -235,6 +235,33 @@ const MasterMaterial = mongoose.model('MasterMaterial', new mongoose.Schema({...
 const MasterLabor = mongoose.model('MasterLabor', new mongoose.Schema({...MasterDataSchema.obj},{timestamps:true}));
 const MasterExtraWork = mongoose.model('MasterExtraWork', new mongoose.Schema({...MasterDataSchema.obj},{timestamps:true}));
 const ProductionSiteEntry = mongoose.model('ProductionSiteEntry', ProductionSiteSchema);
+const SettingsSchema = new mongoose.Schema({ key:{type:String,unique:true}, companyName:String, shortName:String, logo:String, address:String, state:String, stateCode:String, gstin:String, phone1:String, phone2:String, invoiceTitle:String, invoicePrefix:String, signatureName:String, bankName:String, bankAccount:String, bankIfsc:String, terms:String }, {timestamps:true});
+const Settings = mongoose.model('Settings', SettingsSchema);
+
+const DEFAULT_BRANDING = {
+  key: 'branding',
+  companyName: 'P. K. INTERLOCKS & HOLLOW BRICKS',
+  shortName: 'PK Interlock',
+  logo: '🏭',
+  address: 'HAJ ROAD, VILAKKODE, IRITTY',
+  state: 'Kerala',
+  stateCode: '32',
+  gstin: '32AESHA2414P1ZP',
+  phone1: '7034116685',
+  phone2: '9946956685',
+  invoiceTitle: 'TAX INVOICE',
+  invoicePrefix: 'INV',
+  signatureName: 'P.K. Interlocks & Hollowbricks',
+  bankName: '',
+  bankAccount: '',
+  bankIfsc: '',
+  terms: 'Certified that the particulars given above are true and correct.',
+};
+
+async function getBranding() {
+  const saved = await Settings.findOne({ key: 'branding' }).lean();
+  return { ...DEFAULT_BRANDING, ...(saved || {}) };
+}
 
 async function seedData() {
   const count = await User.countDocuments();
@@ -258,6 +285,20 @@ app.post('/api/login', async(req,res)=>{
     if(!user) return res.status(401).json({message:'Invalid credentials'});
     res.json({_id:user._id,name:user.name,username:user.username,role:user.role,avatar:user.avatar,company:user.company});
   } catch(e){ res.status(500).json({message:'Server error'}); }
+});
+
+app.get('/api/settings/branding', async(req,res)=>{
+  try { res.json(await getBranding()); }
+  catch(e) { res.status(500).json({ message: e.message }); }
+});
+app.put('/api/settings/branding', async(req,res)=>{
+  try {
+    const allowed = ['companyName','shortName','logo','address','state','stateCode','gstin','phone1','phone2','invoiceTitle','invoicePrefix','signatureName','bankName','bankAccount','bankIfsc','terms'];
+    const data = { key: 'branding' };
+    allowed.forEach(k => { if (req.body[k] !== undefined) data[k] = req.body[k]; });
+    const saved = await Settings.findOneAndUpdate({ key: 'branding' }, data, { new:true, upsert:true, setDefaultsOnInsert:true });
+    res.json({ ...DEFAULT_BRANDING, ...saved.toObject() });
+  } catch(e) { res.status(400).json({ message: e.message }); }
 });
 
 app.get('/api/stock', async(req,res)=>res.json(await Stock.find()));
@@ -355,7 +396,9 @@ app.post('/api/sales', async(req,res)=>{
     const amountPaid = +(req.body.amountPaid) || 0;
     const amountPending = total - amountPaid;
     const status = amountPending <= 0 ? 'paid' : amountPaid > 0 ? 'partial' : 'pending';
-    const invoiceNumber = req.body.invoiceNumber || `INV-${Date.now().toString().slice(-8)}`;
+    const branding = await getBranding();
+    const prefix = String(branding.invoicePrefix || 'INV').trim() || 'INV';
+    const invoiceNumber = req.body.invoiceNumber || `${prefix}-${Date.now().toString().slice(-8)}`;
     const sale = await Sales.create({ ...req.body, mobileNumber: mobile, invoiceNumber, productType, quantity, sqftPerPiece, sqftQty, taxableAmount, cgstPercent, sgstPercent, cgstAmount, sgstAmount, total, discount, amountPaid, amountPending, status });
     await adjustStockFromSale(sale, -1);
     await upsertCustomerFromSale(sale, req.body.saveToCustomerMaster !== false);
@@ -1854,6 +1897,7 @@ const exportSources = () => ({
   masterMaterials: MasterMaterial,
   masterLabors: MasterLabor,
   masterExtraWorks: MasterExtraWork,
+  settings: Settings,
   devices: Device,
 });
 
