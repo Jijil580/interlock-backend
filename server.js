@@ -12,10 +12,10 @@ mongoose.connect(process.env.MONGO_URI)
   .catch(err => console.log('❌ MongoDB Error:', err));
 
 const UserSchema = new mongoose.Schema({ name:String, username:{type:String,unique:true}, password:String, role:{type:String,enum:['admin','supervisor','user']}, avatar:String, active:{type:Boolean,default:true}, company:String }, {timestamps:true});
-const StockSchema = new mongoose.Schema({ name:String, category:String, itemId:String, shape:String, color:String, size:String, thickness:String, unit:String, quantity:Number, sqftPerPiece:Number, sqftQuantity:Number, minStock:Number, price:Number, company:String }, {timestamps:true});
+const StockSchema = new mongoose.Schema({ name:String, category:String, productType:String, itemId:String, shape:String, color:String, size:String, thickness:String, unit:String, quantity:Number, sqftPerPiece:Number, sqftQuantity:Number, minStock:Number, price:Number, company:String }, {timestamps:true});
 const RawMaterialSchema = new mongoose.Schema({ name:String, material:String, supplier:String, unit:String, quantity:Number, qty:Number, price:Number, costPerUnit:Number, lastPurchase:String, company:String }, {timestamps:true});
 const ProductionSchema = new mongoose.Schema({ date:String, product:String, shift:String, target:Number, produced:Number, machine:String, supervisor:String, status:{type:String,default:'pending'}, notes:String, note:String, company:String }, {timestamps:true});
-const SalesSchema = new mongoose.Schema({ date:String, customer:String, mobileNumber:String, address:String, gstNumber:String, state:String, stateCode:String, reverseCharge:String, transportMode:String, vehicleNumber:String, dateOfSupply:String, placeOfSupply:String, hsnSac:String, bankName:String, bankAccount:String, bankIfsc:String, terms:String, product:String, itemId:String, category:String, shape:String, color:String, size:String, thickness:String, interlockDetails:String, quantity:Number, sqftPerPiece:Number, sqftQty:Number, unit:String, price:Number, unitPrice:Number, discount:{type:Number,default:0}, taxableAmount:Number, billType:String, cgstPercent:Number, sgstPercent:Number, cgstAmount:Number, sgstAmount:Number, total:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, invoiceNumber:String, status:{type:String,default:'pending'}, addedBy:String, company:String }, {timestamps:true});
+const SalesSchema = new mongoose.Schema({ date:String, customer:String, mobileNumber:String, address:String, gstNumber:String, state:String, stateCode:String, reverseCharge:String, transportMode:String, vehicleNumber:String, dateOfSupply:String, placeOfSupply:String, hsnSac:String, bankName:String, bankAccount:String, bankIfsc:String, terms:String, product:String, productType:String, itemId:String, category:String, shape:String, color:String, size:String, thickness:String, interlockDetails:String, quantity:Number, sqftPerPiece:Number, sqftQty:Number, unit:String, price:Number, unitPrice:Number, discount:{type:Number,default:0}, taxableAmount:Number, billType:String, cgstPercent:Number, sgstPercent:Number, cgstAmount:Number, sgstAmount:Number, total:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, invoiceNumber:String, status:{type:String,default:'pending'}, addedBy:String, company:String }, {timestamps:true});
 const CustomerSchema = new mongoose.Schema({ mobile:{type:String,unique:true}, name:String, address:String, gstNumber:String, notes:String, totalPurchases:{type:Number,default:0}, totalSalesAmount:{type:Number,default:0}, totalDiscount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, totalQuantity:{type:Number,default:0}, company:String, addedBy:String }, {timestamps:true});
 const SiteWorkSchema = new mongoose.Schema({ customerName:String, phone:String, siteLocation:String, location:String, interlockType:String, interlockColor:String, selectedWorkers:[String], startDate:String, endDate:String, status:{type:String,default:'running'}, workUnit:String, workSize:String, ratePerUnit:String, baseWorkCost:String, extraWork:Array, extraMaterials:Array, materialCost:String, laborCost:String, totalCost:String, payments:Array, totalReceived:Number, pendingAmount:String, paymentStatus:{type:String,default:'pending'}, paymentMode:String, note:String, addedBy:String, workStatus:String, totalAmount:Number, paidAmount:Number, company:String }, {timestamps:true});
 const WorkerReportSchema = new mongoose.Schema({ siteName:String, phoneNo:String, startingDate:String, workerName:String, totalArea:String, workingCost:String, extraWork:String, extraMaterial:String, totalWorkingArea:String, totalAmount:String, note:String, paymentMode:String, upiId:String, bankName:String, bankBranch:String, bankAccount:String, amountReceivedBy:String, materialSupply:String, materialType:String, signatures:{supervisor:Boolean,office:Boolean,admin:Boolean}, addedBy:String }, {timestamps:true});
@@ -230,6 +230,7 @@ const WorkerPayment = mongoose.model('WorkerPayment', WorkerPaymentSchema);
 const Purchase = mongoose.model('Purchase', PurchaseSchema);
 const Supplier = mongoose.model('Supplier', SupplierSchema);
 const MasterInterlock = mongoose.model('MasterInterlock', MasterDataSchema);
+const MasterHollowBrick = mongoose.model('MasterHollowBrick', MasterDataSchema);
 const MasterMaterial = mongoose.model('MasterMaterial', new mongoose.Schema({...MasterDataSchema.obj},{timestamps:true}));
 const MasterLabor = mongoose.model('MasterLabor', new mongoose.Schema({...MasterDataSchema.obj},{timestamps:true}));
 const MasterExtraWork = mongoose.model('MasterExtraWork', new mongoose.Schema({...MasterDataSchema.obj},{timestamps:true}));
@@ -264,22 +265,28 @@ app.post('/api/stock', async(req,res)=>{
   try {
     const body = { ...req.body };
     const category = body.category || '';
+    const productType = body.productType || '';
     const color = body.color || '';
+    const size = body.size || '';
     body.quantity = +(body.quantity) || 0;
-    body.sqftPerPiece = +(body.sqftPerPiece) || 0;
-    body.sqftQuantity = +(body.sqftQuantity) || body.quantity * body.sqftPerPiece;
+    body.sqftPerPiece = body.productType === 'hollowbrick' ? 0 : (+(body.sqftPerPiece) || 0);
+    body.sqftQuantity = body.productType === 'hollowbrick' ? 0 : (+(body.sqftQuantity) || body.quantity * body.sqftPerPiece);
     body.unit = body.unit || 'piece';
     const existing = await Stock.findOne({
       name: { $regex: `^${escapeRegex(String(body.name || '').trim())}$`, $options: 'i' },
       unit: body.unit,
+      ...(productType ? { productType } : {}),
       ...(category ? { category } : { $or: [{ category: '' }, { category: { $exists: false } }] }),
-      ...(color ? { color } : { $or: [{ color: '' }, { color: { $exists: false } }] })
+      ...(color ? { color } : { $or: [{ color: '' }, { color: { $exists: false } }] }),
+      ...(size ? { size } : { $or: [{ size: '' }, { size: { $exists: false } }] })
     });
     if (existing) {
       existing.quantity = (+(existing.quantity) || 0) + body.quantity;
+      existing.productType = existing.productType || productType;
       existing.color = existing.color || color;
-      existing.sqftPerPiece = existing.sqftPerPiece || body.sqftPerPiece;
-      existing.sqftQuantity = (+(existing.quantity) || 0) * (+(existing.sqftPerPiece) || 0);
+      existing.size = existing.size || size;
+      existing.sqftPerPiece = existing.productType === 'hollowbrick' ? 0 : (existing.sqftPerPiece || body.sqftPerPiece);
+      existing.sqftQuantity = existing.productType === 'hollowbrick' ? 0 : ((+(existing.quantity) || 0) * (+(existing.sqftPerPiece) || 0));
       existing.minStock = body.minStock ?? existing.minStock;
       existing.price = body.price ?? existing.price;
       await existing.save();
@@ -291,8 +298,9 @@ app.post('/api/stock', async(req,res)=>{
 app.put('/api/stock/:id', async(req,res)=>{
   const body = { ...req.body };
   const quantity = +(body.quantity) || 0;
-  const sqftPerPiece = +(body.sqftPerPiece) || 0;
-  body.sqftQuantity = +(body.sqftQuantity) || quantity * sqftPerPiece;
+  const sqftPerPiece = body.productType === 'hollowbrick' ? 0 : (+(body.sqftPerPiece) || 0);
+  body.sqftPerPiece = sqftPerPiece;
+  body.sqftQuantity = body.productType === 'hollowbrick' ? 0 : (+(body.sqftQuantity) || quantity * sqftPerPiece);
   res.json(await Stock.findByIdAndUpdate(req.params.id,body,{new:true}));
 });
 app.delete('/api/stock/:id', async(req,res)=>{await Stock.findByIdAndDelete(req.params.id);res.json({ok:true});});
@@ -328,10 +336,12 @@ app.post('/api/sales', async(req,res)=>{
     const mobile = normalizeMobile(req.body.mobileNumber);
     if (!mobile || mobile.length < 10) return res.status(400).json({ message: 'Valid mobile number is required' });
     const quantity = +(req.body.quantity) || 0;
-    const master = req.body.itemId ? await MasterInterlock.findById(req.body.itemId).lean().catch(()=>null) : null;
-    const sqftPerPiece = +(req.body.sqftPerPiece ?? master?.sqftPerPiece ?? 0) || 0;
-    const sqftQty = +(req.body.sqftQty ?? (quantity * sqftPerPiece)) || 0;
-    const calculatedTaxable = sqftQty ? sqftQty * (+(req.body.price) || 0) : +(req.body.total) || 0;
+    const productType = req.body.productType === 'hollowbrick' ? 'hollowbrick' : 'interlock';
+    const MasterModel = productType === 'hollowbrick' ? MasterHollowBrick : MasterInterlock;
+    const master = req.body.itemId ? await MasterModel.findById(req.body.itemId).lean().catch(()=>null) : null;
+    const sqftPerPiece = productType === 'hollowbrick' ? 0 : +(req.body.sqftPerPiece ?? master?.sqftPerPiece ?? 0) || 0;
+    const sqftQty = productType === 'hollowbrick' ? 0 : +(req.body.sqftQty ?? (quantity * sqftPerPiece)) || 0;
+    const calculatedTaxable = (productType === 'hollowbrick' ? quantity : sqftQty) * (+(req.body.price) || 0);
     const taxableAmount = +(req.body.taxableAmount ?? calculatedTaxable) || 0;
     const cgstPercent = +(req.body.cgstPercent) || 0;
     const sgstPercent = +(req.body.sgstPercent) || 0;
@@ -343,7 +353,7 @@ app.post('/api/sales', async(req,res)=>{
     const amountPending = total - amountPaid;
     const status = amountPending <= 0 ? 'paid' : amountPaid > 0 ? 'partial' : 'pending';
     const invoiceNumber = req.body.invoiceNumber || `INV-${Date.now().toString().slice(-8)}`;
-    const sale = await Sales.create({ ...req.body, mobileNumber: mobile, invoiceNumber, quantity, sqftPerPiece, sqftQty, taxableAmount, cgstPercent, sgstPercent, cgstAmount, sgstAmount, total, discount, amountPaid, amountPending, status });
+    const sale = await Sales.create({ ...req.body, mobileNumber: mobile, invoiceNumber, productType, quantity, sqftPerPiece, sqftQty, taxableAmount, cgstPercent, sgstPercent, cgstAmount, sgstAmount, total, discount, amountPaid, amountPending, status });
     await adjustStockFromSale(sale, -1);
     await upsertCustomerFromSale(sale, req.body.saveToCustomerMaster !== false);
     res.json(sale);
@@ -663,13 +673,17 @@ function stockCandidateNames(itemName, color, category) {
   ].filter(Boolean))];
 }
 
-async function findStockCandidates({ itemName, product, color, category, itemId }) {
+async function findStockCandidates({ itemName, product, color, category, itemId, size, productType }) {
   const name = itemName || product;
   const names = stockCandidateNames(name, color, category);
   const filters = [];
   if (itemId) filters.push({ itemId: String(itemId) });
-  filters.push({ name: { $in: names } });
-  if (category) filters.push({ category, name: { $in: names } });
+  const extra = {
+    ...(productType ? { productType } : {}),
+    ...(size ? { size } : {})
+  };
+  filters.push({ ...extra, name: { $in: names } });
+  if (category) filters.push({ ...extra, category, name: { $in: names } });
   return Stock.find({ $or: filters }).sort({ itemId: -1, category: -1, createdAt: 1 });
 }
 
@@ -683,6 +697,7 @@ async function mergeStockCandidates(candidates, metadata = {}) {
   }
   primary.name = metadata.name || primary.name;
   primary.category = primary.category || metadata.category || '';
+  primary.productType = primary.productType || metadata.productType || '';
   primary.itemId = primary.itemId || metadata.itemId || '';
   primary.shape = primary.shape || metadata.shape || '';
   primary.color = primary.color || metadata.color || '';
@@ -696,18 +711,19 @@ async function mergeStockCandidates(candidates, metadata = {}) {
 }
 
 async function updateStockFromProduction(production) {
-  const { itemName, producedQty, unit, unitType, color, category, itemId, shape, size, thickness } = production || {};
+  const { itemName, producedQty, unit, unitType, color, category, itemId, shape, size, thickness, productType } = production || {};
   const qty = +(producedQty) || 0;
   if (!itemName || !qty) return null;
   const master = itemId ? await MasterInterlock.findById(itemId).lean().catch(()=>null) : null;
   const sqftPerPiece = +(production?.sqftPerPiece ?? master?.sqftPerPiece ?? 0) || 0;
   const stockName = stockKeyFromProduction(itemName, color, category);
-  const candidates = await findStockCandidates({ itemName, color, category, itemId });
-  let stock = await mergeStockCandidates(candidates, { name: stockName, category, itemId, shape, color, size, thickness, sqftPerPiece, unit: unit || unitType });
+  const candidates = await findStockCandidates({ itemName, color, category, itemId, size, productType });
+  let stock = await mergeStockCandidates(candidates, { name: stockName, category, productType, itemId, shape, color, size, thickness, sqftPerPiece, unit: unit || unitType });
   if (stock) {
     stock.quantity = (+(stock.quantity) || 0) + qty;
     stock.name = stock.name || stockName;
     stock.category = stock.category || category || '';
+    stock.productType = stock.productType || productType || '';
     stock.itemId = stock.itemId || itemId || '';
     stock.shape = stock.shape || shape || '';
     stock.color = stock.color || color || '';
@@ -719,7 +735,7 @@ async function updateStockFromProduction(production) {
     await stock.save();
   } else {
     stock = await Stock.create({
-      name: stockName, category: category || '', itemId: itemId || '',
+      name: stockName, category: category || '', productType: productType || '', itemId: itemId || '',
       shape: shape || '', color: color || '', size: size || '', thickness: thickness || '',
       quantity: qty, sqftPerPiece, sqftQuantity: qty * sqftPerPiece, unit: unit || unitType || 'piece', minStock: 0, price: 0
     });
@@ -733,7 +749,7 @@ async function adjustStockFromSale(sale, direction = -1) {
   if (!itemName || !qty) return null;
   const category = sale?.category || '';
   const stockName = stockKeyFromProduction(itemName, sale?.color, category);
-  const candidates = await findStockCandidates({ itemName, color: sale?.color, category, itemId: sale?.itemId });
+  const candidates = await findStockCandidates({ itemName, color: sale?.color, category, itemId: sale?.itemId, size: sale?.size, productType: sale?.productType });
   if (candidates.length) {
     let remaining = Math.abs(qty);
     for (const stock of candidates) {
@@ -743,13 +759,14 @@ async function adjustStockFromSale(sale, direction = -1) {
       stock.quantity = current + change;
       remaining -= Math.abs(change);
       stock.category = stock.category || category;
+      stock.productType = stock.productType || sale?.productType || '';
       stock.itemId = stock.itemId || sale?.itemId || '';
       stock.shape = stock.shape || sale?.shape || '';
       stock.color = stock.color || sale?.color || '';
       stock.size = stock.size || sale?.size || '';
       stock.thickness = stock.thickness || sale?.thickness || '';
-      stock.sqftPerPiece = stock.sqftPerPiece || +(sale?.sqftPerPiece || 0) || 0;
-      stock.sqftQuantity = (+(stock.quantity) || 0) * (+(stock.sqftPerPiece) || 0);
+      stock.sqftPerPiece = sale?.productType === 'hollowbrick' ? 0 : (stock.sqftPerPiece || +(sale?.sqftPerPiece || 0) || 0);
+      stock.sqftQuantity = sale?.productType === 'hollowbrick' ? 0 : ((+(stock.quantity) || 0) * (+(stock.sqftPerPiece) || 0));
       if (sale?.unit) stock.unit = sale.unit;
       await stock.save();
       if (qty > 0) break;
@@ -762,9 +779,9 @@ async function adjustStockFromSale(sale, direction = -1) {
     return candidates[0];
   } else {
     const stock = await Stock.create({
-      name: stockName, category, itemId: sale?.itemId || '',
+      name: stockName, category, productType: sale?.productType || '', itemId: sale?.itemId || '',
       shape: sale?.shape || '', color: sale?.color || '', size: sale?.size || '', thickness: sale?.thickness || '',
-      quantity: qty, sqftPerPiece: +(sale?.sqftPerPiece || 0) || 0, sqftQuantity: qty * (+(sale?.sqftPerPiece || 0) || 0), unit: sale?.unit || 'piece', minStock: 0, price: +(sale?.price || 0) || 0
+      quantity: qty, sqftPerPiece: sale?.productType === 'hollowbrick' ? 0 : (+(sale?.sqftPerPiece || 0) || 0), sqftQuantity: sale?.productType === 'hollowbrick' ? 0 : (qty * (+(sale?.sqftPerPiece || 0) || 0)), unit: sale?.unit || 'piece', minStock: 0, price: +(sale?.price || 0) || 0
     });
     return stock;
   }
@@ -1199,7 +1216,7 @@ app.post('/api/purchases', async(req,res)=>{
   } catch(e) { res.status(400).json({ message: e.message }); }
 });
 
-const masterModels = {interlock:MasterInterlock,materials:MasterMaterial,labor:MasterLabor,extrawork:MasterExtraWork};
+const masterModels = {interlock:MasterInterlock,hollowbricks:MasterHollowBrick,materials:MasterMaterial,labor:MasterLabor,extrawork:MasterExtraWork};
 
 function siteCostOf(site) {
   return +(site?.totalCost || site?.totalAmount || 0);
@@ -1248,7 +1265,7 @@ function currentPlanningWindow() {
   const firstPrevious = new Date(now.getFullYear(), now.getMonth() - 1, 1);
   return `${firstPrevious.getFullYear()}-${String(firstPrevious.getMonth() + 1).padStart(2, '0')}-01`;
 }
-['interlock','materials','labor','extrawork'].forEach(type=>{
+['interlock','hollowbricks','materials','labor','extrawork'].forEach(type=>{
   const Model = masterModels[type];
   app.get(`/api/masterdata/${type}`, async(req,res)=>res.json(await Model.find()));
   app.post(`/api/masterdata/${type}`, async(req,res)=>res.json(await Model.create(req.body)));
