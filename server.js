@@ -274,16 +274,13 @@ app.post('/api/stock', async(req,res)=>{
     body.sqftQuantity = body.productType === 'hollowbrick' ? 0 : (+(body.sqftQuantity) || body.quantity * body.sqftPerPiece);
     body.unit = body.unit || 'piece';
     const fieldMatch = (field, value) => value ? { [field]: value } : { $or: [{ [field]: '' }, { [field]: { $exists: false } }] };
+    const matchFields = [fieldMatch('category', category), fieldMatch('color', color)];
+    if (productType === 'hollowbrick') matchFields.push(fieldMatch('size', size));
     const existing = await Stock.findOne({
       name: { $regex: `^${escapeRegex(String(body.name || '').trim())}$`, $options: 'i' },
       unit: body.unit,
       ...(productType ? { productType } : {}),
-      $and: [
-        fieldMatch('category', category),
-        fieldMatch('color', color),
-        fieldMatch('size', size),
-        fieldMatch('thickness', thickness)
-      ]
+      $and: matchFields
     });
     if (existing) {
       existing.quantity = (+(existing.quantity) || 0) + body.quantity;
@@ -679,15 +676,14 @@ function stockCandidateNames(itemName, color, category) {
   ].filter(Boolean))];
 }
 
-async function findStockCandidates({ itemName, product, color, category, itemId, size, thickness, productType }) {
+async function findStockCandidates({ itemName, product, color, category, itemId, size, productType }) {
   const name = itemName || product;
   const names = stockCandidateNames(name, color, category);
   const filters = [];
   if (itemId) filters.push({ itemId: String(itemId) });
   const extra = {
     ...(productType ? { productType } : {}),
-    ...(size ? { size } : {}),
-    ...(thickness ? { thickness } : {})
+    ...(productType === 'hollowbrick' && size ? { size } : {})
   };
   filters.push({ ...extra, name: { $in: names } });
   if (category) filters.push({ ...extra, category, name: { $in: names } });
@@ -724,7 +720,7 @@ async function updateStockFromProduction(production) {
   const master = itemId ? await MasterInterlock.findById(itemId).lean().catch(()=>null) : null;
   const sqftPerPiece = +(production?.sqftPerPiece ?? master?.sqftPerPiece ?? 0) || 0;
   const stockName = stockKeyFromProduction(itemName, color, category);
-  const candidates = await findStockCandidates({ itemName, color, category, itemId, size, thickness, productType });
+  const candidates = await findStockCandidates({ itemName, color, category, itemId, size, productType });
   let stock = await mergeStockCandidates(candidates, { name: stockName, category, productType, itemId, shape, color, size, thickness, sqftPerPiece, unit: unit || unitType });
   if (stock) {
     stock.quantity = (+(stock.quantity) || 0) + qty;
@@ -756,7 +752,7 @@ async function adjustStockFromSale(sale, direction = -1) {
   if (!itemName || !qty) return null;
   const category = sale?.category || '';
   const stockName = stockKeyFromProduction(itemName, sale?.color, category);
-  const candidates = await findStockCandidates({ itemName, color: sale?.color, category, itemId: sale?.itemId, size: sale?.size, thickness: sale?.thickness, productType: sale?.productType });
+  const candidates = await findStockCandidates({ itemName, color: sale?.color, category, itemId: sale?.itemId, size: sale?.size, productType: sale?.productType });
   if (candidates.length) {
     let remaining = Math.abs(qty);
     for (const stock of candidates) {
