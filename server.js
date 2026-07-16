@@ -339,12 +339,12 @@ app.post('/api/sales', async(req,res)=>{
     const mobile = normalizeMobile(req.body.mobileNumber);
     if (!mobile || mobile.length < 10) return res.status(400).json({ message: 'Valid mobile number is required' });
     const quantity = +(req.body.quantity) || 0;
-    const productType = req.body.productType === 'hollowbrick' ? 'hollowbrick' : 'interlock';
-    const MasterModel = productType === 'hollowbrick' ? MasterHollowBrick : MasterInterlock;
-    const master = req.body.itemId ? await MasterModel.findById(req.body.itemId).lean().catch(()=>null) : null;
+    const productType = req.body.productType === 'hollowbrick' ? 'hollowbrick' : req.body.productType === 'other' ? 'other' : 'interlock';
+    const MasterModel = productType === 'hollowbrick' ? MasterHollowBrick : productType === 'interlock' ? MasterInterlock : null;
+    const master = req.body.itemId && MasterModel ? await MasterModel.findById(req.body.itemId).lean().catch(()=>null) : null;
     const sqftPerPiece = productType === 'hollowbrick' ? 0 : +(req.body.sqftPerPiece ?? master?.sqftPerPiece ?? 0) || 0;
     const sqftQty = productType === 'hollowbrick' ? 0 : +(req.body.sqftQty ?? (quantity * sqftPerPiece)) || 0;
-    const calculatedTaxable = (productType === 'hollowbrick' ? quantity : sqftQty) * (+(req.body.price) || 0);
+    const calculatedTaxable = (productType === 'hollowbrick' || (productType === 'other' && !sqftQty) ? quantity : sqftQty) * (+(req.body.price) || 0);
     const taxableAmount = +(req.body.taxableAmount ?? calculatedTaxable) || 0;
     const cgstPercent = +(req.body.cgstPercent) || 0;
     const sgstPercent = +(req.body.sgstPercent) || 0;
@@ -747,6 +747,7 @@ async function updateStockFromProduction(production) {
 }
 
 async function adjustStockFromSale(sale, direction = -1) {
+  if (sale?.productType === 'other') return null;
   const qty = (+(sale?.quantity) || 0) * direction;
   const itemName = sale?.product || sale?.itemName;
   if (!itemName || !qty) return null;
