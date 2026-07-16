@@ -1833,6 +1833,91 @@ app.get('/api/cashflow', async(req,res)=>{
   }
 });
 
+const exportSources = () => ({
+  users: User,
+  stock: Stock,
+  rawMaterials: RawMaterial,
+  production: Production,
+  productionSiteEntries: ProductionSiteEntry,
+  sales: Sales,
+  customers: Customer,
+  siteWorks: SiteWork,
+  workerReports: WorkerReport,
+  dailyReports: DailyReport,
+  workPlans: WorkPlan,
+  workers: Worker,
+  workerPayments: WorkerPayment,
+  purchases: Purchase,
+  suppliers: Supplier,
+  masterInterlocks: MasterInterlock,
+  masterHollowBricks: MasterHollowBrick,
+  masterMaterials: MasterMaterial,
+  masterLabors: MasterLabor,
+  masterExtraWorks: MasterExtraWork,
+  devices: Device,
+});
+
+function csvEscape(value) {
+  if (value === null || value === undefined) return '';
+  const text = typeof value === 'object' ? JSON.stringify(value) : String(value);
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function flattenForExport(row = {}) {
+  const out = {};
+  Object.entries(row).forEach(([key, value]) => {
+    if (key === '__v') return;
+    if (value instanceof Date) out[key] = value.toISOString();
+    else if (value && typeof value === 'object' && value._bsontype === 'ObjectID') out[key] = String(value);
+    else if (Array.isArray(value)) out[key] = JSON.stringify(value);
+    else if (value && typeof value === 'object') out[key] = JSON.stringify(value);
+    else out[key] = value;
+  });
+  return out;
+}
+
+function toCsv(records = []) {
+  const rows = records.map(flattenForExport);
+  const headers = [...new Set(rows.flatMap(row => Object.keys(row)))];
+  return [
+    headers.map(csvEscape).join(','),
+    ...rows.map(row => headers.map(header => csvEscape(row[header])).join(','))
+  ].join('\n');
+}
+
+app.get('/api/export/:dataset', async(req,res)=>{
+  try {
+    const sources = exportSources();
+    const dataset = req.params.dataset;
+    const format = String(req.query.format || 'json').toLowerCase();
+    const stamp = new Date().toISOString().slice(0, 10);
+
+    if (dataset === 'all') {
+      const backup = {};
+      for (const [name, Model] of Object.entries(sources)) {
+        backup[name] = await Model.find().lean();
+      }
+      res.setHeader('Content-Disposition', `attachment; filename="pk-interlock-backup-${stamp}.json"`);
+      return res.json({ exportedAt: new Date().toISOString(), collections: backup });
+    }
+
+    const Model = sources[dataset];
+    if (!Model) return res.status(404).json({ message: 'Export dataset not found' });
+    const records = await Model.find().lean();
+
+    if (format === 'csv') {
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${dataset}-${stamp}.csv"`);
+      return res.send(toCsv(records));
+    }
+
+    res.setHeader('Content-Disposition', `attachment; filename="${dataset}-${stamp}.json"`);
+    res.json({ exportedAt: new Date().toISOString(), dataset, records });
+  } catch(e) {
+    res.status(500).json({ message: e.message });
+  }
+});
+
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, async()=>{
