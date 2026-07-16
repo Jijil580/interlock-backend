@@ -268,23 +268,29 @@ app.post('/api/stock', async(req,res)=>{
     const productType = body.productType || '';
     const color = body.color || '';
     const size = body.size || '';
+    const thickness = body.thickness || '';
     body.quantity = +(body.quantity) || 0;
     body.sqftPerPiece = body.productType === 'hollowbrick' ? 0 : (+(body.sqftPerPiece) || 0);
     body.sqftQuantity = body.productType === 'hollowbrick' ? 0 : (+(body.sqftQuantity) || body.quantity * body.sqftPerPiece);
     body.unit = body.unit || 'piece';
+    const fieldMatch = (field, value) => value ? { [field]: value } : { $or: [{ [field]: '' }, { [field]: { $exists: false } }] };
     const existing = await Stock.findOne({
       name: { $regex: `^${escapeRegex(String(body.name || '').trim())}$`, $options: 'i' },
       unit: body.unit,
       ...(productType ? { productType } : {}),
-      ...(category ? { category } : { $or: [{ category: '' }, { category: { $exists: false } }] }),
-      ...(color ? { color } : { $or: [{ color: '' }, { color: { $exists: false } }] }),
-      ...(size ? { size } : { $or: [{ size: '' }, { size: { $exists: false } }] })
+      $and: [
+        fieldMatch('category', category),
+        fieldMatch('color', color),
+        fieldMatch('size', size),
+        fieldMatch('thickness', thickness)
+      ]
     });
     if (existing) {
       existing.quantity = (+(existing.quantity) || 0) + body.quantity;
       existing.productType = existing.productType || productType;
       existing.color = existing.color || color;
       existing.size = existing.size || size;
+      existing.thickness = existing.thickness || thickness;
       existing.sqftPerPiece = existing.productType === 'hollowbrick' ? 0 : (existing.sqftPerPiece || body.sqftPerPiece);
       existing.sqftQuantity = existing.productType === 'hollowbrick' ? 0 : ((+(existing.quantity) || 0) * (+(existing.sqftPerPiece) || 0));
       existing.minStock = body.minStock ?? existing.minStock;
@@ -673,14 +679,15 @@ function stockCandidateNames(itemName, color, category) {
   ].filter(Boolean))];
 }
 
-async function findStockCandidates({ itemName, product, color, category, itemId, size, productType }) {
+async function findStockCandidates({ itemName, product, color, category, itemId, size, thickness, productType }) {
   const name = itemName || product;
   const names = stockCandidateNames(name, color, category);
   const filters = [];
   if (itemId) filters.push({ itemId: String(itemId) });
   const extra = {
     ...(productType ? { productType } : {}),
-    ...(size ? { size } : {})
+    ...(size ? { size } : {}),
+    ...(thickness ? { thickness } : {})
   };
   filters.push({ ...extra, name: { $in: names } });
   if (category) filters.push({ ...extra, category, name: { $in: names } });
@@ -717,7 +724,7 @@ async function updateStockFromProduction(production) {
   const master = itemId ? await MasterInterlock.findById(itemId).lean().catch(()=>null) : null;
   const sqftPerPiece = +(production?.sqftPerPiece ?? master?.sqftPerPiece ?? 0) || 0;
   const stockName = stockKeyFromProduction(itemName, color, category);
-  const candidates = await findStockCandidates({ itemName, color, category, itemId, size, productType });
+  const candidates = await findStockCandidates({ itemName, color, category, itemId, size, thickness, productType });
   let stock = await mergeStockCandidates(candidates, { name: stockName, category, productType, itemId, shape, color, size, thickness, sqftPerPiece, unit: unit || unitType });
   if (stock) {
     stock.quantity = (+(stock.quantity) || 0) + qty;
@@ -749,7 +756,7 @@ async function adjustStockFromSale(sale, direction = -1) {
   if (!itemName || !qty) return null;
   const category = sale?.category || '';
   const stockName = stockKeyFromProduction(itemName, sale?.color, category);
-  const candidates = await findStockCandidates({ itemName, color: sale?.color, category, itemId: sale?.itemId, size: sale?.size, productType: sale?.productType });
+  const candidates = await findStockCandidates({ itemName, color: sale?.color, category, itemId: sale?.itemId, size: sale?.size, thickness: sale?.thickness, productType: sale?.productType });
   if (candidates.length) {
     let remaining = Math.abs(qty);
     for (const stock of candidates) {
