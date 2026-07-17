@@ -25,10 +25,11 @@ const WorkerSchema = new mongoose.Schema({ name:String, phone:String, address:St
 const WorkerPaymentSchema = new mongoose.Schema({ workerName:String, amount:Number, date:String, note:String, addedBy:String, source:String, reportDate:String }, {timestamps:true});
 const PurchaseSchema = new mongoose.Schema({ date:String, supplierName:String, supplierPhone:String, supplierMobile:String, supplierAddress:String, itemName:String, itemType:String, quantity:String, unit:String, unitPrice:String, totalAmount:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, vehicleNumber:String, vehicleType:String, driverName:String, driverPhone:String, deliveryAddress:String, note:String, addedBy:String }, {timestamps:true});
 const SupplierSchema = new mongoose.Schema({ name:String, mobile:String, phone:String, address:String, location:String, materialType:String, materials:[String], customMaterial:String, gstNumber:String, notes:String, note:String, totalPurchases:{type:Number,default:0}, totalPurchaseAmount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
-const MasterDataSchema = new mongoose.Schema({ name:String, category:String, shape:String, color:String, size:String, thickness:String, sqftPerPiece:Number, pricePerSqft:Number, pricePerSqm:Number, unit:String, price:Number, stock:Number, rate:Number, rateType:String, description:String, notes:String, addedBy:String }, {timestamps:true});
+const MasterDataSchema = new mongoose.Schema({ name:String, category:String, shape:String, color:String, size:String, thickness:String, sqftPerPiece:Number, boxCount:Number, pricePerSqft:Number, pricePerSqm:Number, unit:String, price:Number, stock:Number, rate:Number, rateType:String, description:String, notes:String, addedBy:String }, {timestamps:true});
 const ProductionSiteSchema = new mongoose.Schema({
   date:String, shift:String, workerId:String, workerName:String,
   itemId:String, itemName:String, category:String, shape:String, color:String, size:String, thickness:String, unitType:String,
+  productType:String, productionUnit:String, boxQty:Number, boxCount:Number,
   producedQty:Number, sqftPerPiece:Number, sqftQty:Number, unit:String, productionRate:Number, totalAmount:Number,
   paymentGiven:Number, amountPending:Number, remarks:String,
   workType:String, notes:String, attendance:Array, totalCost:Number, addedBy:String,
@@ -760,8 +761,9 @@ async function updateStockFromProduction(production) {
   const { itemName, producedQty, unit, unitType, color, category, itemId, shape, size, thickness, productType } = production || {};
   const qty = +(producedQty) || 0;
   if (!itemName || !qty) return null;
-  const master = itemId ? await MasterInterlock.findById(itemId).lean().catch(()=>null) : null;
-  const sqftPerPiece = +(production?.sqftPerPiece ?? master?.sqftPerPiece ?? 0) || 0;
+  const MasterModel = productType === 'hollowbrick' ? MasterHollowBrick : MasterInterlock;
+  const master = itemId ? await MasterModel.findById(itemId).lean().catch(()=>null) : null;
+  const sqftPerPiece = productType === 'hollowbrick' ? 0 : (+(production?.sqftPerPiece ?? master?.sqftPerPiece ?? 0) || 0);
   const stockName = stockKeyFromProduction(itemName, color, category);
   const candidates = await findStockCandidates({ itemName, color, category, itemId, size, productType });
   let stock = await mergeStockCandidates(candidates, { name: stockName, category, productType, itemId, shape, color, size, thickness, sqftPerPiece, unit: unit || unitType });
@@ -1400,18 +1402,24 @@ app.post("/api/productionsite", async(req,res)=>{
       if (!worker || normalizeWorkerType(worker) !== 'Production Worker' || !isWorkerActive(worker)) {
         return res.status(400).json({ message: 'Select an active production worker' });
       }
-      const producedQty = +(body.producedQty) || 0;
-      const master = body.itemId ? await MasterInterlock.findById(body.itemId).lean().catch(()=>null) : null;
-      const sqftPerPiece = +(body.sqftPerPiece ?? master?.sqftPerPiece ?? 0) || 0;
+      const productType = body.productType === 'hollowbrick' ? 'hollowbrick' : 'interlock';
+      const MasterModel = productType === 'hollowbrick' ? MasterHollowBrick : MasterInterlock;
+      const master = body.itemId ? await MasterModel.findById(body.itemId).lean().catch(()=>null) : null;
+      const productionUnit = body.productionUnit === 'box' ? 'box' : 'unit';
+      const boxCount = +(body.boxCount ?? master?.boxCount ?? 0) || 0;
+      const boxQty = +(body.boxQty) || 0;
+      const producedQty = productType === 'hollowbrick' && productionUnit === 'box' ? boxQty * boxCount : (+(body.producedQty) || 0);
+      const sqftPerPiece = productType === 'hollowbrick' ? 0 : (+(body.sqftPerPiece ?? master?.sqftPerPiece ?? 0) || 0);
       const sqftQty = +(body.sqftQty ?? (producedQty * sqftPerPiece)) || 0;
       const productionRate = +(body.productionRate) || 0;
       if (!producedQty) return res.status(400).json({ message: 'Produced quantity is required' });
-      if (!productionRate) return res.status(400).json({ message: 'Rate per unit must be entered manually' });
-      const totalAmount = producedQty * productionRate;
+      if (productType === 'hollowbrick' && productionUnit === 'box' && !boxCount) return res.status(400).json({ message: '1 box count is required' });
+      if (!productionRate) return res.status(400).json({ message: 'Rate per box/unit must be entered manually' });
+      const totalAmount = (productType === 'hollowbrick' && productionUnit === 'box' ? boxQty : producedQty) * productionRate;
       const paymentGiven = +(body.paymentGiven) || 0;
       const amountPending = Math.max(0, totalAmount - paymentGiven);
       const entryData = {
-        ...body, producedQty, sqftPerPiece, sqftQty, productionRate, totalAmount, paymentGiven, amountPending,
+        ...body, productType, productionUnit, boxQty, boxCount, producedQty, sqftPerPiece, sqftQty, productionRate, totalAmount, paymentGiven, amountPending,
       };
       entryData.dedupeKey = productionDedupeKey(entryData);
       const duplicate = await ProductionSiteEntry.findOne({
@@ -1430,7 +1438,7 @@ app.post("/api/productionsite", async(req,res)=>{
         }
         throw err;
       }
-      await updateStockFromProduction({ ...body, producedQty, sqftPerPiece, sqftQty });
+      await updateStockFromProduction({ ...body, productType, producedQty, sqftPerPiece, sqftQty, unit: 'piece', unitType: 'piece' });
       await syncWorkerTotals(body.workerName);
       if (paymentGiven > 0) {
         await recordWorkerPayment(body.workerName, paymentGiven, body.date, 'production', body.addedBy, `Production: ${body.itemName}`);
