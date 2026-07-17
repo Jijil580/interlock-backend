@@ -1406,14 +1406,14 @@ app.post("/api/productionsite", async(req,res)=>{
       const MasterModel = productType === 'hollowbrick' ? MasterHollowBrick : MasterInterlock;
       const master = body.itemId ? await MasterModel.findById(body.itemId).lean().catch(()=>null) : null;
       const productionUnit = body.productionUnit === 'box' ? 'box' : 'unit';
-      const boxCount = +(body.boxCount ?? master?.boxCount ?? 0) || 0;
+      const boxCount = +(master?.boxCount ?? 0) || 0;
       const boxQty = +(body.boxQty) || 0;
       const producedQty = productType === 'hollowbrick' && productionUnit === 'box' ? boxQty * boxCount : (+(body.producedQty) || 0);
       const sqftPerPiece = productType === 'hollowbrick' ? 0 : (+(body.sqftPerPiece ?? master?.sqftPerPiece ?? 0) || 0);
       const sqftQty = +(body.sqftQty ?? (producedQty * sqftPerPiece)) || 0;
       const productionRate = +(body.productionRate) || 0;
       if (!producedQty) return res.status(400).json({ message: 'Produced quantity is required' });
-      if (productType === 'hollowbrick' && productionUnit === 'box' && !boxCount) return res.status(400).json({ message: '1 box count is required' });
+      if (productType === 'hollowbrick' && productionUnit === 'box' && !boxCount) return res.status(400).json({ message: 'Set 1 box count in Hollow Brick master first' });
       if (!productionRate) return res.status(400).json({ message: 'Rate per box/unit must be entered manually' });
       const totalAmount = (productType === 'hollowbrick' && productionUnit === 'box' ? boxQty : producedQty) * productionRate;
       const paymentGiven = +(body.paymentGiven) || 0;
