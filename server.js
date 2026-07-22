@@ -16,6 +16,18 @@ const StockSchema = new mongoose.Schema({ name:String, category:String, productT
 const RawMaterialSchema = new mongoose.Schema({ name:String, material:String, supplier:String, unit:String, quantity:Number, qty:Number, price:Number, costPerUnit:Number, lastPurchase:String, company:String }, {timestamps:true});
 const ProductionSchema = new mongoose.Schema({ date:String, product:String, shift:String, target:Number, produced:Number, machine:String, supervisor:String, status:{type:String,default:'pending'}, notes:String, note:String, company:String }, {timestamps:true});
 const SalesSchema = new mongoose.Schema({ date:String, customer:String, mobileNumber:String, address:String, gstNumber:String, state:String, stateCode:String, reverseCharge:String, transportMode:String, vehicleNumber:String, dateOfSupply:String, placeOfSupply:String, hsnSac:String, bankName:String, bankAccount:String, bankIfsc:String, terms:String, product:String, productType:String, itemId:String, category:String, shape:String, color:String, size:String, thickness:String, interlockDetails:String, quantity:Number, sqftPerPiece:Number, sqftQty:Number, unit:String, price:Number, unitPrice:Number, discount:{type:Number,default:0}, taxableAmount:Number, billType:String, cgstPercent:Number, sgstPercent:Number, cgstAmount:Number, sgstAmount:Number, total:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, invoiceNumber:String, status:{type:String,default:'pending'}, addedBy:String, company:String }, {timestamps:true});
+const QuotationSchema = new mongoose.Schema({
+  quotationNumber:String, date:String, validUntil:String, customerId:String, customer:String, mobileNumber:String, address:String, gstNumber:String, state:String, stateCode:String,
+  shipToName:String, shipToAddress:String, shipToGstNumber:String, shipToState:String, shipToStateCode:String,
+  billType:String, taxType:String, reverseCharge:String, placeOfSupply:String, terms:String, notes:String,
+  items:[{
+    product:String, productType:String, itemId:String, category:String, shape:String, color:String, size:String, thickness:String, hsnSac:String, description:String,
+    quantity:Number, sqftPerPiece:Number, sqftQty:Number, unit:String, rate:Number, discountType:String, discountValue:Number, discountAmount:Number,
+    taxableAmount:Number, cgstPercent:Number, sgstPercent:Number, igstPercent:Number, cgstAmount:Number, sgstAmount:Number, igstAmount:Number, total:Number
+  }],
+  subtotal:Number, discountAmount:Number, taxableAmount:Number, cgstAmount:Number, sgstAmount:Number, igstAmount:Number, taxAmount:Number, total:Number, roundOff:Number,
+  status:{type:String,default:'draft'}, addedBy:String, company:String
+}, {timestamps:true});
 const CustomerSchema = new mongoose.Schema({ mobile:{type:String,unique:true}, name:String, address:String, gstNumber:String, notes:String, totalPurchases:{type:Number,default:0}, totalSalesAmount:{type:Number,default:0}, totalDiscount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, totalQuantity:{type:Number,default:0}, company:String, addedBy:String }, {timestamps:true});
 const SiteWorkSchema = new mongoose.Schema({ customerName:String, phone:String, siteLocation:String, location:String, interlockType:String, interlockColor:String, selectedWorkers:[String], startDate:String, endDate:String, status:{type:String,default:'running'}, workUnit:String, workSize:String, ratePerUnit:String, baseWorkCost:String, extraWork:Array, extraMaterials:Array, materialCost:String, laborCost:String, totalCost:String, payments:Array, totalReceived:Number, pendingAmount:String, paymentStatus:{type:String,default:'pending'}, paymentMode:String, note:String, addedBy:String, workStatus:String, totalAmount:Number, paidAmount:Number, company:String }, {timestamps:true});
 const WorkerReportSchema = new mongoose.Schema({ siteName:String, phoneNo:String, startingDate:String, workerName:String, totalArea:String, workingCost:String, extraWork:String, extraMaterial:String, totalWorkingArea:String, totalAmount:String, note:String, paymentMode:String, upiId:String, bankName:String, bankBranch:String, bankAccount:String, amountReceivedBy:String, materialSupply:String, materialType:String, signatures:{supervisor:Boolean,office:Boolean,admin:Boolean}, addedBy:String }, {timestamps:true});
@@ -45,6 +57,7 @@ const Stock = mongoose.model('Stock', StockSchema);
 const RawMaterial = mongoose.model('RawMaterial', RawMaterialSchema);
 const Production = mongoose.model('Production', ProductionSchema);
 const Sales = mongoose.model('Sales', SalesSchema);
+const Quotation = mongoose.model('Quotation', QuotationSchema);
 const Customer = mongoose.model('Customer', CustomerSchema);
 
 function normalizeMobile(m) {
@@ -179,6 +192,96 @@ async function upsertCustomerFromSale(sale, saveToMaster = true) {
     await customer.save();
   }
   return customer;
+}
+
+async function upsertCustomerBasic(data, saveToMaster = true) {
+  if (!saveToMaster) return null;
+  const mobile = normalizeMobile(data.mobileNumber || data.mobile);
+  if (!mobile || mobile.length < 10) return null;
+  let customer = await Customer.findOne({ mobile });
+  if (!customer) {
+    customer = await Customer.create({
+      mobile,
+      name: data.customer || data.name || '',
+      address: data.address || '',
+      gstNumber: data.gstNumber || '',
+      notes: data.notes || '',
+      company: data.company || 'default',
+      addedBy: data.addedBy || '',
+    });
+  } else {
+    if (data.customer || data.name) customer.name = data.customer || data.name;
+    if (data.address) customer.address = data.address;
+    if (data.gstNumber) customer.gstNumber = data.gstNumber;
+    if (data.notes) customer.notes = data.notes;
+    if (data.addedBy) customer.addedBy = customer.addedBy || data.addedBy;
+    await customer.save();
+  }
+  return customer;
+}
+
+function normalizeQuotation(body = {}) {
+  const billType = body.billType === 'with_gst' ? 'with_gst' : 'without_gst';
+  const taxType = body.taxType === 'igst' ? 'igst' : 'cgst_sgst';
+  let subtotal = 0;
+  let discountAmount = 0;
+  let taxableAmount = 0;
+  let cgstAmount = 0;
+  let sgstAmount = 0;
+  let igstAmount = 0;
+  const items = (Array.isArray(body.items) ? body.items : []).map((raw) => {
+    const quantity = +(raw.quantity) || 0;
+    const sqftPerPiece = +(raw.sqftPerPiece) || 0;
+    const sqftQty = +(raw.sqftQty) || (quantity * sqftPerPiece);
+    const rate = +(raw.rate) || +(raw.price) || 0;
+    const billingQty = raw.productType === 'hollowbrick' ? quantity : (sqftQty || quantity);
+    const lineBase = billingQty * rate;
+    const discountValue = +(raw.discountValue ?? raw.discount) || 0;
+    const itemDiscount = raw.discountType === 'percent' ? lineBase * discountValue / 100 : discountValue;
+    const itemTaxable = Math.max(0, lineBase - itemDiscount);
+    const cgstPercent = billType === 'with_gst' && taxType !== 'igst' ? +(raw.cgstPercent) || 0 : 0;
+    const sgstPercent = billType === 'with_gst' && taxType !== 'igst' ? +(raw.sgstPercent) || 0 : 0;
+    const igstPercent = billType === 'with_gst' && taxType === 'igst' ? +(raw.igstPercent || raw.gstPercent) || 0 : 0;
+    const itemCgst = itemTaxable * cgstPercent / 100;
+    const itemSgst = itemTaxable * sgstPercent / 100;
+    const itemIgst = itemTaxable * igstPercent / 100;
+    const itemTotal = itemTaxable + itemCgst + itemSgst + itemIgst;
+    subtotal += lineBase;
+    discountAmount += itemDiscount;
+    taxableAmount += itemTaxable;
+    cgstAmount += itemCgst;
+    sgstAmount += itemSgst;
+    igstAmount += itemIgst;
+    return {
+      ...raw,
+      quantity, sqftPerPiece, sqftQty, rate,
+      discountType: raw.discountType === 'percent' ? 'percent' : 'amount',
+      discountValue, discountAmount: itemDiscount,
+      taxableAmount: itemTaxable, cgstPercent, sgstPercent, igstPercent,
+      cgstAmount: itemCgst, sgstAmount: itemSgst, igstAmount: itemIgst, total: itemTotal
+    };
+  });
+  const taxAmount = cgstAmount + sgstAmount + igstAmount;
+  const totalBeforeRound = taxableAmount + taxAmount;
+  const total = Math.round(totalBeforeRound);
+  return {
+    ...body,
+    quotationNumber: body.quotationNumber || `QT-${Date.now().toString().slice(-8)}`,
+    date: body.date || new Date().toISOString().slice(0, 10),
+    billType,
+    taxType,
+    mobileNumber: normalizeMobile(body.mobileNumber),
+    items,
+    subtotal,
+    discountAmount,
+    taxableAmount,
+    cgstAmount,
+    sgstAmount,
+    igstAmount,
+    taxAmount,
+    total,
+    roundOff: total - totalBeforeRound,
+  };
 }
 
 async function upsertSupplierFromPurchase(purchase, saveToMaster = true) {
@@ -420,6 +523,54 @@ app.delete('/api/sales/:id', async(req,res)=>{
     const sale = await Sales.findById(req.params.id);
     if (sale) await adjustStockFromSale(sale, 1);
     await Sales.findByIdAndDelete(req.params.id);
+    res.json({ok:true});
+  } catch(e) { res.status(400).json({ message: e.message }); }
+});
+
+app.get('/api/quotations', async(req,res)=>{
+  try {
+    const { mobile, customer, date, fromDate, toDate, quotationNumber, status } = req.query;
+    const filter = {};
+    if (mobile) filter.mobileNumber = normalizeMobile(mobile);
+    if (customer) filter.customer = { $regex: customer, $options: 'i' };
+    if (quotationNumber) filter.quotationNumber = { $regex: quotationNumber, $options: 'i' };
+    if (status) filter.status = status;
+    if (date) filter.date = date;
+    if (fromDate || toDate) {
+      filter.date = {};
+      if (fromDate) filter.date.$gte = fromDate;
+      if (toDate) filter.date.$lte = toDate;
+    }
+    res.json(await Quotation.find(filter).sort({createdAt:-1}));
+  } catch(e) { res.status(500).json({ message: e.message }); }
+});
+app.post('/api/quotations', async(req,res)=>{
+  try {
+    if (!req.body.customer) return res.status(400).json({ message: 'Customer name is required' });
+    const mobile = normalizeMobile(req.body.mobileNumber);
+    if (!mobile || mobile.length < 10) return res.status(400).json({ message: 'Valid mobile number is required' });
+    if (!Array.isArray(req.body.items) || !req.body.items.length) return res.status(400).json({ message: 'Add at least one product' });
+    const data = normalizeQuotation({ ...req.body, mobileNumber: mobile });
+    const quotation = await Quotation.create(data);
+    await upsertCustomerBasic(quotation, req.body.saveToCustomerMaster !== false);
+    res.json(quotation);
+  } catch(e) { res.status(400).json({ message: e.message }); }
+});
+app.put('/api/quotations/:id', async(req,res)=>{
+  try {
+    if (!req.body.customer) return res.status(400).json({ message: 'Customer name is required' });
+    const mobile = normalizeMobile(req.body.mobileNumber);
+    if (!mobile || mobile.length < 10) return res.status(400).json({ message: 'Valid mobile number is required' });
+    const data = normalizeQuotation({ ...req.body, mobileNumber: mobile });
+    const quotation = await Quotation.findByIdAndUpdate(req.params.id, data, {new:true});
+    if (!quotation) return res.status(404).json({ message: 'Quotation not found' });
+    await upsertCustomerBasic(quotation, req.body.saveToCustomerMaster !== false);
+    res.json(quotation);
+  } catch(e) { res.status(400).json({ message: e.message }); }
+});
+app.delete('/api/quotations/:id', async(req,res)=>{
+  try {
+    await Quotation.findByIdAndDelete(req.params.id);
     res.json({ok:true});
   } catch(e) { res.status(400).json({ message: e.message }); }
 });
@@ -1891,6 +2042,7 @@ const exportSources = () => ({
   production: Production,
   productionSiteEntries: ProductionSiteEntry,
   sales: Sales,
+  quotations: Quotation,
   customers: Customer,
   siteWorks: SiteWork,
   workerReports: WorkerReport,
