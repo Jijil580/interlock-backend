@@ -373,6 +373,69 @@ function normalizeDriverReport(body = {}, existing = null) {
   };
 }
 
+async function recalcCustomerTotals(mobile) {
+  const customer = await Customer.findOne({ mobile });
+  const purchases = await Sales.find({ mobileNumber: mobile });
+  if (!customer) return null;
+  const summary = summarizeSales(purchases, customer);
+  customer.totalPurchases = summary.totalPurchases;
+  customer.totalSalesAmount = summary.totalSalesAmount;
+  customer.totalDiscount = summary.totalDiscount;
+  customer.totalPaid = summary.totalPaid;
+  customer.totalPending = summary.totalPending;
+  customer.totalQuantity = summary.totalQuantity;
+  await customer.save();
+  return customer;
+}
+
+async function receiveCustomerPayment(mobile, amount) {
+  let remaining = +(amount) || 0;
+  if (!mobile || remaining <= 0) return [];
+  const updates = [];
+  const pendingSales = await Sales.find({ mobileNumber: mobile, amountPending: { $gt: 0 } }).sort({ date: 1, createdAt: 1 });
+  for (const sale of pendingSales) {
+    if (remaining <= 0) break;
+    const pending = +(sale.amountPending) || 0;
+    const applied = Math.min(pending, remaining);
+    sale.amountPaid = (+(sale.amountPaid) || 0) + applied;
+    sale.amountPending = Math.max(0, pending - applied);
+    sale.status = sale.amountPending <= 0 ? 'paid' : 'partial';
+    await sale.save();
+    updates.push({ saleId: sale._id, applied });
+    remaining -= applied;
+  }
+  await recalcCustomerTotals(mobile);
+  return updates;
+}
+
+async function payDriverLedgerTotal({ driverName, driverMobile, amount, date, mode, note, addedBy }) {
+  let remaining = +(amount) || 0;
+  const mobile = normalizeMobile(driverMobile);
+  const filter = {};
+  if (mobile) filter.driverMobile = mobile;
+  else if (driverName) filter.driverName = driverName;
+  else return [];
+
+  const pendingReports = await DriverReport.find({ ...filter, driverWagePending: { $gt: 0 } }).sort({ date: 1, createdAt: 1 });
+  const appliedRows = [];
+  for (const report of pendingReports) {
+    if (remaining <= 0) break;
+    const pending = +(report.driverWagePending) || 0;
+    const applied = Math.min(pending, remaining);
+    report.payments = [...(report.payments || []), {
+      amount: applied,
+      date: date || new Date().toISOString().slice(0, 10),
+      mode: mode || 'Cash',
+      note: note || 'Driver wage payment',
+      addedBy: addedBy || '',
+    }];
+    await applyDriverWage(report);
+    appliedRows.push({ reportId: report._id, applied });
+    remaining -= applied;
+  }
+  return appliedRows;
+}
+
 async function applyDriverWage(report) {
   let earned = +(report.driverCharge) || 0;
   if (report.driverChargeType === 'coolie') {
@@ -730,6 +793,18 @@ app.get('/api/customers/mobile/:mobile', async(req,res)=>{
     if (!ledger) return res.json({ customer: null, purchases: [], itemSummary: [] });
     res.json(ledger);
   } catch(e) { res.status(500).json({ message: e.message }); }
+});
+
+app.post('/api/customers/:mobile/payment', async(req,res)=>{
+  try {
+    const mobile = normalizeMobile(req.params.mobile);
+    const amount = +(req.body.amount) || 0;
+    if (!mobile || mobile.length < 10) return res.status(400).json({ message: 'Valid mobile number is required' });
+    if (amount <= 0) return res.status(400).json({ message: 'Payment amount is required' });
+    const applied = await receiveCustomerPayment(mobile, amount);
+    const ledger = await buildCustomerLedger(mobile);
+    res.json({ ok: true, applied, ...(ledger || { customer: null, purchases: [], itemSummary: [] }) });
+  } catch(e) { res.status(400).json({ message: e.message }); }
 });
 
 app.get('/api/customers/search', async(req,res)=>{
@@ -1279,7 +1354,22 @@ async function buildProductionWorkerReport(workerName, filters = {}) {
   const totalQuantity = productions.reduce((a, p) => a + (+(p.producedQty) || 0), 0);
   const totalSqft = productions.reduce((a, p) => a + (+(p.sqftQty || 0) || ((+(p.producedQty) || 0) * (+(p.sqftPerPiece) || 0))), 0);
   const totalEarnings = productions.reduce((a, p) => a + (+(p.totalAmount) || 0), 0);
-  const totalPaid = productions.reduce((a, p) => a + (+(p.paymentGiven) || 0), 0);
+  const productionPaid = productions.reduce((a, p) => a + (+(p.paymentGiven) || 0), 0);
+  const manualPayments = await WorkerPayment.find({ workerName, source: { $in: ['worker-ledger-production', 'worker-payment', 'manual'] } }).sort({ date: -1, createdAt: -1 });
+  const manualPaid = manualPayments.reduce((a, p) => a + (+(p.amount) || 0), 0);
+  const totalPaid = productionPaid + manualPaid;
+  const productionHistory = productions.map(p => ({
+    _id: p._id, date: p.date, item: p.itemName, color: p.color || '',
+    qty: p.producedQty, sqftPerPiece: p.sqftPerPiece, sqftQty: +(p.sqftQty || 0) || ((+(p.producedQty) || 0) * (+(p.sqftPerPiece) || 0)), unit: p.unit || p.unitType || '',
+    rate: p.productionRate, amount: p.totalAmount, paid: +(p.paymentGiven) || 0,
+    pending: Math.max(0, (+(p.totalAmount) || 0) - (+(p.paymentGiven) || 0)),
+  }));
+  const paymentHistory = manualPayments.map(p => ({
+    _id: p._id, date: p.date, item: 'Worker Payment', color: '',
+    qty: 0, sqftPerPiece: 0, sqftQty: 0, unit: '-',
+    rate: 0, amount: 0, paid: +(p.amount) || 0, pending: 0,
+    isExtraPayment: true, note: p.note || '',
+  }));
 
   return {
     type: 'production',
@@ -1294,12 +1384,7 @@ async function buildProductionWorkerReport(workerName, filters = {}) {
       totalPending: Math.max(0, totalEarnings - totalPaid),
     },
     itemSummary: Object.values(itemMap),
-    history: productions.map(p => ({
-      _id: p._id, date: p.date, item: p.itemName, color: p.color || '',
-      qty: p.producedQty, sqftPerPiece: p.sqftPerPiece, sqftQty: +(p.sqftQty || 0) || ((+(p.producedQty) || 0) * (+(p.sqftPerPiece) || 0)), unit: p.unit || p.unitType || '',
-      rate: p.productionRate, amount: p.totalAmount, paid: +(p.paymentGiven) || 0,
-      pending: Math.max(0, (+(p.totalAmount) || 0) - (+(p.paymentGiven) || 0)),
-    })),
+    history: [...productionHistory, ...paymentHistory].sort((a, b) => (b.date || '').localeCompare(a.date || '')),
     productions,
   };
 }
@@ -1379,6 +1464,29 @@ async function buildSiteWorkerReport(workerName, filters = {}) {
       }
       siteMap[sk].totalPaid += paid;
       siteMap[sk].entries.push(row);
+    });
+  });
+
+  const manualPayments = await WorkerPayment.find({ workerName, source: 'worker-ledger-site' }).sort({ date: -1, createdAt: -1 });
+  manualPayments.forEach(p => {
+    history.push({
+      _id: p._id,
+      date: p.date,
+      workerName,
+      siteName: 'Worker Payment',
+      dutyArea: '-',
+      workDone: 'Worker wage payment',
+      workCategory: 'Payment',
+      workArea: 0,
+      unit: '-',
+      rate: 0,
+      amountEarned: 0,
+      paymentGiven: +(p.amount) || 0,
+      dailyPending: 0,
+      balance: 0,
+      isExtraPayment: true,
+      paymentMode: 'Cash',
+      remarks: p.note || '',
     });
   });
 
@@ -1504,6 +1612,22 @@ app.post('/api/driverreports/:id/payment', async(req,res)=>{
     }];
     await applyDriverWage(report);
     res.json(await DriverReport.findById(report._id));
+  } catch(e) { res.status(400).json({ message: e.message }); }
+});
+
+app.post('/api/driverreports/payment', async(req,res)=>{
+  try {
+    const { driverName, driverMobile, amount, date, mode, note, addedBy } = req.body;
+    const paymentAmount = +(amount) || 0;
+    if (!driverName && !driverMobile) return res.status(400).json({ message: 'Driver name or mobile is required' });
+    if (paymentAmount <= 0) return res.status(400).json({ message: 'Payment amount is required' });
+    const applied = await payDriverLedgerTotal({ driverName, driverMobile, amount: paymentAmount, date, mode, note, addedBy });
+    const filter = {};
+    const mobile = normalizeMobile(driverMobile);
+    if (mobile) filter.driverMobile = mobile;
+    else filter.driverName = driverName;
+    const reports = await DriverReport.find(filter).sort({ date: -1, createdAt: -1 });
+    res.json({ ok: true, applied, reports, summary: summarizeDriverReports(reports) });
   } catch(e) { res.status(400).json({ message: e.message }); }
 });
 
