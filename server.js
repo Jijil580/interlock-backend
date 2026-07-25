@@ -11,7 +11,7 @@ mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log('✅ MongoDB Connected!'))
   .catch(err => console.log('❌ MongoDB Error:', err));
 
-const UserSchema = new mongoose.Schema({ name:String, username:{type:String,unique:true}, password:String, role:{type:String,enum:['admin','supervisor','user']}, avatar:String, active:{type:Boolean,default:true}, company:String }, {timestamps:true});
+const UserSchema = new mongoose.Schema({ name:String, username:{type:String,unique:true}, password:String, role:{type:String,enum:['admin','supervisor','user','driver']}, avatar:String, active:{type:Boolean,default:true}, mobile:String, vehicleName:String, vehicleNumber:String, company:String }, {timestamps:true});
 const StockSchema = new mongoose.Schema({ name:String, category:String, productType:String, itemId:String, shape:String, color:String, size:String, thickness:String, unit:String, quantity:Number, sqftPerPiece:Number, sqftQuantity:Number, minStock:Number, price:Number, company:String }, {timestamps:true});
 const RawMaterialSchema = new mongoose.Schema({ name:String, material:String, supplier:String, unit:String, quantity:Number, qty:Number, price:Number, costPerUnit:Number, lastPurchase:String, company:String }, {timestamps:true});
 const ProductionSchema = new mongoose.Schema({ date:String, product:String, shift:String, target:Number, produced:Number, machine:String, supervisor:String, status:{type:String,default:'pending'}, notes:String, note:String, company:String }, {timestamps:true});
@@ -35,9 +35,18 @@ const DailyReportSchema = new mongoose.Schema({ date:String, siteName:String, si
 const WorkPlanSchema = new mongoose.Schema({ date:String, siteName:String, task:String, workers:String, materials:String, note:String, status:{type:String,default:'planned'}, fromDate:String, toDate:String, site:String, plannedWork:String, supervisor:String, workersAllocated:String, materialsNeeded:String, estimatedCost:Number, paymentPlan:String, notes:String, archived:{type:Boolean,default:false}, addedBy:String }, {timestamps:true});
 const WorkerSchema = new mongoose.Schema({ name:String, phone:String, address:String, role:String, workerType:String, workerCategory:String, status:{type:String,default:'Active'}, workLocationType:String, paymentType:String, customPaymentType:String, rateType:String, rateAmount:Number, totalProduction:{type:Number,default:0}, totalEarnings:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
 const WorkerPaymentSchema = new mongoose.Schema({ workerName:String, amount:Number, date:String, note:String, addedBy:String, source:String, reportDate:String }, {timestamps:true});
-const PurchaseSchema = new mongoose.Schema({ date:String, supplierName:String, supplierPhone:String, supplierMobile:String, supplierAddress:String, itemName:String, itemType:String, quantity:String, unit:String, unitPrice:String, totalAmount:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, vehicleNumber:String, vehicleType:String, driverName:String, driverPhone:String, deliveryAddress:String, note:String, addedBy:String }, {timestamps:true});
+const PurchaseSchema = new mongoose.Schema({ date:String, supplierName:String, supplierPhone:String, supplierMobile:String, supplierAddress:String, itemName:String, itemType:String, quantity:String, unit:String, unitPrice:String, totalAmount:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, vehicleNumber:String, vehicleType:String, driverName:String, driverPhone:String, deliveryAddress:String, note:String, addedBy:String, source:String, sourceId:String }, {timestamps:true});
 const SupplierSchema = new mongoose.Schema({ name:String, mobile:String, phone:String, address:String, location:String, materialType:String, materials:[String], customMaterial:String, gstNumber:String, notes:String, note:String, totalPurchases:{type:Number,default:0}, totalPurchaseAmount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
 const MasterDataSchema = new mongoose.Schema({ name:String, category:String, shape:String, color:String, size:String, thickness:String, sqftPerPiece:Number, boxCount:Number, pricePerSqft:Number, pricePerSqm:Number, unit:String, price:Number, stock:Number, rate:Number, rateType:String, description:String, notes:String, addedBy:String }, {timestamps:true});
+const DriverReportSchema = new mongoose.Schema({
+  date:String, driverName:String, driverMobile:String, vehicleName:String, vehicleNumber:String,
+  category:String, itemId:String, itemName:String, itemDetails:String, quantity:Number, unit:String,
+  supplierId:String, supplierName:String, supplierMobile:String, supplierAddress:String, saveToSupplierMaster:Boolean,
+  loadingFrom:String, unloadedLocation:String, cashGivenToSupplier:Number, supplierPendingCash:Number,
+  driverChargeType:String, driverCharge:Number, driverWageEarned:Number, driverWagePaid:Number, driverWagePending:Number,
+  payments:[{amount:Number,date:String,mode:String,note:String,addedBy:String}],
+  remarks:String, addedBy:String, sourcePurchaseId:String, company:String
+}, {timestamps:true});
 const ProductionSiteSchema = new mongoose.Schema({
   date:String, shift:String, workerId:String, workerName:String,
   itemId:String, itemName:String, category:String, shape:String, color:String, size:String, thickness:String, unitType:String,
@@ -325,6 +334,124 @@ async function upsertSupplierFromPurchase(purchase, saveToMaster = true) {
   }
   return supplier;
 }
+
+async function recalcSupplierTotalsFromPurchases(purchase) {
+  const mobile = normalizeMobile(purchase.supplierMobile || purchase.supplierPhone);
+  let supplier = mobile ? await Supplier.findOne({ $or: [{ mobile }, { phone: mobile }] }) : null;
+  if (!supplier && purchase.supplierName) supplier = await Supplier.findOne({ name: { $regex: `^${escapeRegex(purchase.supplierName)}$`, $options: 'i' } });
+  if (!supplier) return null;
+  const filter = mobile ? { $or: [{ supplierMobile: mobile }, { supplierPhone: mobile }] } : { supplierName: { $regex: `^${escapeRegex(supplier.name)}$`, $options: 'i' } };
+  const records = await Purchase.find(filter).lean();
+  supplier.totalPurchases = records.length;
+  supplier.totalPurchaseAmount = records.reduce((a, p) => a + (+(p.totalAmount) || 0), 0);
+  supplier.totalPaid = records.reduce((a, p) => a + (+(p.amountPaid) || 0), 0);
+  supplier.totalPending = records.reduce((a, p) => a + (+(p.amountPending) || 0), 0);
+  await supplier.save();
+  return supplier;
+}
+
+function normalizeDriverReport(body = {}, existing = null) {
+  const driverCharge = +(body.driverCharge) || 0;
+  const driverChargeType = body.driverChargeType === 'coolie' ? 'coolie' : 'batha';
+  const paidFromHistory = (existing?.payments || []).reduce((a, p) => a + (+(p.amount) || 0), 0);
+  const directPaid = +(body.driverWagePaid) || 0;
+  const driverWagePaid = Math.max(paidFromHistory, directPaid);
+  const cashGivenToSupplier = +(body.cashGivenToSupplier) || 0;
+  const totalAmount = +(body.totalAmount) || cashGivenToSupplier + (+(body.supplierPendingCash) || 0);
+  return {
+    ...body,
+    date: body.date || new Date().toISOString().slice(0, 10),
+    driverMobile: normalizeMobile(body.driverMobile || body.mobile),
+    supplierMobile: normalizeMobile(body.supplierMobile || body.supplierPhone),
+    category: body.category || 'Other',
+    quantity: +(body.quantity) || 0,
+    cashGivenToSupplier,
+    supplierPendingCash: Math.max(0, totalAmount - cashGivenToSupplier),
+    driverChargeType,
+    driverCharge,
+    driverWagePaid,
+  };
+}
+
+async function applyDriverWage(report) {
+  let earned = +(report.driverCharge) || 0;
+  if (report.driverChargeType === 'coolie') {
+    const existing = await DriverReport.findOne({
+      _id: { $ne: report._id },
+      driverName: report.driverName,
+      date: report.date,
+      driverChargeType: 'coolie',
+      driverWageEarned: { $gt: 0 }
+    }).lean();
+    if (existing) earned = 0;
+  }
+  report.driverWageEarned = earned;
+  report.driverWagePaid = (report.payments || []).reduce((a, p) => a + (+(p.amount) || 0), 0);
+  report.driverWagePending = Math.max(0, earned - (+(report.driverWagePaid) || 0));
+  await report.save();
+  return report;
+}
+
+async function syncDriverRawMaterialPurchase(report) {
+  if (report.category !== 'Raw Material') {
+    if (report.sourcePurchaseId) {
+      const oldPurchase = await Purchase.findById(report.sourcePurchaseId).catch(()=>null);
+      if (oldPurchase) {
+        await Purchase.findByIdAndDelete(report.sourcePurchaseId);
+        await recalcSupplierTotalsFromPurchases(oldPurchase);
+      }
+      report.sourcePurchaseId = '';
+      await report.save();
+    }
+    return null;
+  }
+  const purchaseBody = {
+    date: report.date,
+    supplierName: report.supplierName || 'Unknown Supplier',
+    supplierPhone: report.supplierMobile || '',
+    supplierMobile: report.supplierMobile || '',
+    supplierAddress: report.supplierAddress || '',
+    itemName: report.itemName || 'Raw Material',
+    itemType: 'Raw Material',
+    quantity: String(report.quantity || ''),
+    unit: report.unit || '',
+    unitPrice: '',
+    totalAmount: (+(report.cashGivenToSupplier) || 0) + (+(report.supplierPendingCash) || 0),
+    amountPaid: +(report.cashGivenToSupplier) || 0,
+    amountPending: +(report.supplierPendingCash) || 0,
+    paymentMode: 'Cash',
+    vehicleNumber: report.vehicleNumber || '',
+    vehicleType: report.vehicleName || '',
+    driverName: report.driverName || '',
+    driverPhone: report.driverMobile || '',
+    deliveryAddress: report.unloadedLocation || '',
+    note: `Driver report: ${report.loadingFrom || ''} to ${report.unloadedLocation || ''}`,
+    addedBy: report.addedBy || report.driverName || '',
+    source: 'driver-report',
+    sourceId: String(report._id),
+  };
+  let purchase = report.sourcePurchaseId ? await Purchase.findById(report.sourcePurchaseId) : null;
+  if (!purchase) purchase = await Purchase.findOne({ source: 'driver-report', sourceId: String(report._id) });
+  if (purchase) {
+    Object.assign(purchase, purchaseBody);
+    await purchase.save();
+  } else {
+    purchase = await Purchase.create(purchaseBody);
+  }
+  report.sourcePurchaseId = String(purchase._id);
+  await report.save();
+  await upsertSupplierFromPurchase(purchase, report.saveToSupplierMaster !== false);
+  await recalcSupplierTotalsFromPurchases(purchase);
+  return purchase;
+}
+
+function summarizeDriverReports(reports = []) {
+  const totalEarned = reports.reduce((a, r) => a + (+(r.driverWageEarned) || 0), 0);
+  const totalPaid = reports.reduce((a, r) => a + (+(r.driverWagePaid) || 0), 0);
+  const totalPending = Math.max(0, totalEarned - totalPaid);
+  const days = new Set(reports.map(r => r.date).filter(Boolean)).size;
+  return { totalTrips: reports.length, totalWorkingDays: days, totalEarned, totalPaid, totalPending };
+}
 const SiteWork = mongoose.model('SiteWork', SiteWorkSchema);
 const WorkerReport = mongoose.model('WorkerReport', WorkerReportSchema);
 const DailyReport = mongoose.model('DailyReport', DailyReportSchema);
@@ -333,6 +460,7 @@ const Worker = mongoose.model('Worker', WorkerSchema);
 const WorkerPayment = mongoose.model('WorkerPayment', WorkerPaymentSchema);
 const Purchase = mongoose.model('Purchase', PurchaseSchema);
 const Supplier = mongoose.model('Supplier', SupplierSchema);
+const DriverReport = mongoose.model('DriverReport', DriverReportSchema);
 const MasterInterlock = mongoose.model('MasterInterlock', MasterDataSchema);
 const MasterHollowBrick = mongoose.model('MasterHollowBrick', MasterDataSchema);
 const MasterMaterial = mongoose.model('MasterMaterial', new mongoose.Schema({...MasterDataSchema.obj},{timestamps:true}));
@@ -380,14 +508,14 @@ async function seedData() {
 }
 
 app.get('/api/users', async(req,res)=>res.json(await User.find({},'-password')));
-app.post('/api/users', async(req,res)=>{ try{ const {name,username,password,role,company}=req.body; const avatar=name.split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase(); res.json(await User.create({name,username,password,role,avatar,company:company||'default'})); }catch(e){res.status(400).json({message:e.message});} });
+app.post('/api/users', async(req,res)=>{ try{ const {name,username,password,role,company,mobile,vehicleName,vehicleNumber}=req.body; const avatar=name.split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase(); res.json(await User.create({name,username,password,role,avatar,mobile:normalizeMobile(mobile),vehicleName,vehicleNumber,company:company||'default'})); }catch(e){res.status(400).json({message:e.message});} });
 app.put('/api/users/:id', async(req,res)=>res.json(await User.findByIdAndUpdate(req.params.id,req.body,{new:true})));
 app.post('/api/login', async(req,res)=>{
   try {
     const {username,password}=req.body;
     const user = await User.findOne({username,password,active:true});
     if(!user) return res.status(401).json({message:'Invalid credentials'});
-    res.json({_id:user._id,name:user.name,username:user.username,role:user.role,avatar:user.avatar,company:user.company});
+    res.json({_id:user._id,name:user.name,username:user.username,role:user.role,avatar:user.avatar,mobile:user.mobile,vehicleName:user.vehicleName,vehicleNumber:user.vehicleNumber,company:user.company});
   } catch(e){ res.status(500).json({message:'Server error'}); }
 });
 
@@ -1322,6 +1450,63 @@ app.post('/api/workerpayments', async(req,res)=>{
   } catch(e) { res.status(400).json({ message: e.message }); }
 });
 
+app.get('/api/driverreports', async(req,res)=>{
+  try {
+    const { role, name, driver, mobile, date, fromDate, toDate, category } = req.query;
+    const filter = {};
+    if (role === 'driver' && name) filter.driverName = name;
+    else if (driver) filter.driverName = { $regex: driver, $options: 'i' };
+    if (mobile) filter.driverMobile = normalizeMobile(mobile);
+    if (category) filter.category = category;
+    if (date) filter.date = date;
+    if (fromDate || toDate) {
+      filter.date = {};
+      if (fromDate) filter.date.$gte = fromDate;
+      if (toDate) filter.date.$lte = toDate;
+    }
+    const reports = await DriverReport.find(filter).sort({ date: -1, createdAt: -1 });
+    res.json({ reports, summary: summarizeDriverReports(reports) });
+  } catch(e) { res.status(500).json({ message: e.message }); }
+});
+app.post('/api/driverreports', async(req,res)=>{
+  try {
+    if (!req.body.driverName) return res.status(400).json({ message: 'Driver name is required' });
+    if (!req.body.itemName) return res.status(400).json({ message: 'Item name is required' });
+    const report = await DriverReport.create(normalizeDriverReport(req.body));
+    await applyDriverWage(report);
+    await syncDriverRawMaterialPurchase(report);
+    res.json(await DriverReport.findById(report._id));
+  } catch(e) { res.status(400).json({ message: e.message }); }
+});
+app.put('/api/driverreports/:id', async(req,res)=>{
+  try {
+    const existing = await DriverReport.findById(req.params.id);
+    if (!existing) return res.status(404).json({ message: 'Driver report not found' });
+    Object.assign(existing, normalizeDriverReport(req.body, existing));
+    await existing.save();
+    await applyDriverWage(existing);
+    await syncDriverRawMaterialPurchase(existing);
+    res.json(await DriverReport.findById(existing._id));
+  } catch(e) { res.status(400).json({ message: e.message }); }
+});
+app.post('/api/driverreports/:id/payment', async(req,res)=>{
+  try {
+    const report = await DriverReport.findById(req.params.id);
+    if (!report) return res.status(404).json({ message: 'Driver report not found' });
+    const amount = +(req.body.amount) || 0;
+    if (amount <= 0) return res.status(400).json({ message: 'Payment amount is required' });
+    report.payments = [...(report.payments || []), {
+      amount,
+      date: req.body.date || new Date().toISOString().slice(0, 10),
+      mode: req.body.mode || 'Cash',
+      note: req.body.note || '',
+      addedBy: req.body.addedBy || '',
+    }];
+    await applyDriverWage(report);
+    res.json(await DriverReport.findById(report._id));
+  } catch(e) { res.status(400).json({ message: e.message }); }
+});
+
 app.get('/api/workers/ledger', async(req,res)=>{
   try {
     const { name, fromDate, toDate } = req.query;
@@ -2052,6 +2237,7 @@ const exportSources = () => ({
   workerPayments: WorkerPayment,
   purchases: Purchase,
   suppliers: Supplier,
+  driverReports: DriverReport,
   masterInterlocks: MasterInterlock,
   masterHollowBricks: MasterHollowBrick,
   masterMaterials: MasterMaterial,
