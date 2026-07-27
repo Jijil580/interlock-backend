@@ -1602,7 +1602,6 @@ app.get('/api/driverreports', async(req,res)=>{
 app.post('/api/driverreports', async(req,res)=>{
   try {
     if (!req.body.driverName) return res.status(400).json({ message: 'Driver name is required' });
-    if (!req.body.itemName) return res.status(400).json({ message: 'Item name is required' });
     const report = await DriverReport.create(normalizeDriverReport(req.body));
     await applyDriverWage(report);
     await syncDriverRawMaterialPurchase(report);
