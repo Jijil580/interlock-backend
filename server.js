@@ -43,7 +43,8 @@ const DriverReportSchema = new mongoose.Schema({
   category:String, itemId:String, itemName:String, itemDetails:String, quantity:Number, unit:String,
   supplierId:String, supplierName:String, supplierMobile:String, supplierAddress:String, saveToSupplierMaster:Boolean,
   loadingFrom:String, unloadedLocation:String, cashGivenToSupplier:Number, supplierPendingCash:Number,
-  expenses:[{category:String,amount:Number,note:String}],
+  expenses:[{category:String,amount:Number,liters:Number,note:String}],
+  vehicleKm:{startKm:Number,endKm:Number,totalKm:Number,note:String},
   driverChargeType:String, driverCharge:Number, driverWageEarned:Number, driverWagePaid:Number, driverWagePending:Number,
   payments:[{amount:Number,date:String,mode:String,note:String,addedBy:String}],
   remarks:String, addedBy:String, sourcePurchaseId:String, company:String
@@ -362,8 +363,18 @@ function normalizeDriverReport(body = {}, existing = null) {
   const expenses = (Array.isArray(body.expenses) ? body.expenses : []).map(e => ({
     category: e.category || 'Other',
     amount: +(e.amount) || 0,
+    liters: +(e.liters) || 0,
     note: e.note || '',
-  })).filter(e => e.amount > 0 || e.note);
+  })).filter(e => e.amount > 0 || e.liters > 0 || e.note);
+  const startKm = +(body.vehicleKm?.startKm ?? body.startKm) || 0;
+  const endKm = +(body.vehicleKm?.endKm ?? body.endKm) || 0;
+  const enteredTotalKm = +(body.vehicleKm?.totalKm ?? body.totalKm) || 0;
+  const vehicleKm = {
+    startKm,
+    endKm,
+    totalKm: enteredTotalKm || Math.max(0, endKm - startKm),
+    note: body.vehicleKm?.note || body.kmNote || '',
+  };
   return {
     ...body,
     date: body.date || new Date().toISOString().slice(0, 10),
@@ -374,6 +385,7 @@ function normalizeDriverReport(body = {}, existing = null) {
     cashGivenToSupplier,
     supplierPendingCash: Math.max(0, totalAmount - cashGivenToSupplier),
     expenses,
+    vehicleKm,
     driverChargeType,
     driverCharge,
     driverWagePaid,
@@ -519,9 +531,11 @@ function summarizeDriverReports(reports = []) {
   const totalEarned = reports.reduce((a, r) => a + (+(r.driverWageEarned) || 0), 0);
   const totalPaid = reports.reduce((a, r) => a + (+(r.driverWagePaid) || 0), 0);
   const totalExpenses = reports.reduce((a, r) => a + (Array.isArray(r.expenses) ? r.expenses : []).reduce((s, e) => s + (+(e.amount) || 0), 0), 0);
+  const totalLiters = reports.reduce((a, r) => a + (Array.isArray(r.expenses) ? r.expenses : []).reduce((s, e) => s + (+(e.liters) || 0), 0), 0);
+  const totalKm = reports.reduce((a, r) => a + (+(r.vehicleKm?.totalKm) || 0), 0);
   const totalPending = Math.max(0, totalEarned - totalPaid);
   const days = new Set(reports.map(r => r.date).filter(Boolean)).size;
-  return { totalTrips: reports.length, totalWorkingDays: days, totalEarned, totalPaid, totalPending, totalExpenses };
+  return { totalTrips: reports.length, totalWorkingDays: days, totalEarned, totalPaid, totalPending, totalExpenses, totalLiters, totalKm };
 }
 const SiteWork = mongoose.model('SiteWork', SiteWorkSchema);
 const WorkerReport = mongoose.model('WorkerReport', WorkerReportSchema);
@@ -2036,6 +2050,8 @@ app.get('/api/office-daily-report', async(req,res)=>{
       productionPayments: productionEntries.reduce((sum, entry) => sum + (+(entry.paymentGiven) || 0), 0),
       productionPending: productionEntries.reduce((sum, entry) => sum + (+(entry.amountPending ?? ((+(entry.totalAmount) || 0) - (+(entry.paymentGiven) || 0))) || 0), 0),
       driverExpenseTotal: driverReports.reduce((sum, report) => sum + (Array.isArray(report.expenses) ? report.expenses : []).reduce((inner, e) => inner + (+(e.amount) || 0), 0), 0),
+      driverFuelLiters: driverReports.reduce((sum, report) => sum + (Array.isArray(report.expenses) ? report.expenses : []).reduce((inner, e) => inner + (+(e.liters) || 0), 0), 0),
+      driverKmRun: driverReports.reduce((sum, report) => sum + (+(report.vehicleKm?.totalKm) || 0), 0),
     };
     totals.cashReceived = totals.salesReceived;
     totals.cashPaid = totals.purchasePaid + totals.productionPayments + totals.driverExpenseTotal;
@@ -2056,11 +2072,13 @@ app.get('/api/office-daily-report', async(req,res)=>{
         vehicleNumber: report.vehicleNumber,
         category: expense.category || 'Other',
         amount: +(expense.amount) || 0,
+        liters: +(expense.liters) || 0,
         note: expense.note || '',
         tripCategory: report.category || '',
         itemName: report.itemName || '',
         loadingFrom: report.loadingFrom || '',
         unloadedLocation: report.unloadedLocation || '',
+        vehicleKm: report.vehicleKm || {},
       }))),
       productionEntries,
       productionItemSummary: Object.values(productionItemMap).sort((a,b)=>a.item.localeCompare(b.item)),
