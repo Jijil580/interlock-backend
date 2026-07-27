@@ -43,6 +43,7 @@ const DriverReportSchema = new mongoose.Schema({
   category:String, itemId:String, itemName:String, itemDetails:String, quantity:Number, unit:String,
   supplierId:String, supplierName:String, supplierMobile:String, supplierAddress:String, saveToSupplierMaster:Boolean,
   loadingFrom:String, unloadedLocation:String, cashGivenToSupplier:Number, supplierPendingCash:Number,
+  expenses:[{category:String,amount:Number,note:String}],
   driverChargeType:String, driverCharge:Number, driverWageEarned:Number, driverWagePaid:Number, driverWagePending:Number,
   payments:[{amount:Number,date:String,mode:String,note:String,addedBy:String}],
   remarks:String, addedBy:String, sourcePurchaseId:String, company:String
@@ -358,6 +359,11 @@ function normalizeDriverReport(body = {}, existing = null) {
   const driverWagePaid = Math.max(paidFromHistory, directPaid);
   const cashGivenToSupplier = +(body.cashGivenToSupplier) || 0;
   const totalAmount = +(body.totalAmount) || cashGivenToSupplier + (+(body.supplierPendingCash) || 0);
+  const expenses = (Array.isArray(body.expenses) ? body.expenses : []).map(e => ({
+    category: e.category || 'Other',
+    amount: +(e.amount) || 0,
+    note: e.note || '',
+  })).filter(e => e.amount > 0 || e.note);
   return {
     ...body,
     date: body.date || new Date().toISOString().slice(0, 10),
@@ -367,6 +373,7 @@ function normalizeDriverReport(body = {}, existing = null) {
     quantity: +(body.quantity) || 0,
     cashGivenToSupplier,
     supplierPendingCash: Math.max(0, totalAmount - cashGivenToSupplier),
+    expenses,
     driverChargeType,
     driverCharge,
     driverWagePaid,
@@ -511,9 +518,10 @@ async function syncDriverRawMaterialPurchase(report) {
 function summarizeDriverReports(reports = []) {
   const totalEarned = reports.reduce((a, r) => a + (+(r.driverWageEarned) || 0), 0);
   const totalPaid = reports.reduce((a, r) => a + (+(r.driverWagePaid) || 0), 0);
+  const totalExpenses = reports.reduce((a, r) => a + (Array.isArray(r.expenses) ? r.expenses : []).reduce((s, e) => s + (+(e.amount) || 0), 0), 0);
   const totalPending = Math.max(0, totalEarned - totalPaid);
   const days = new Set(reports.map(r => r.date).filter(Boolean)).size;
-  return { totalTrips: reports.length, totalWorkingDays: days, totalEarned, totalPaid, totalPending };
+  return { totalTrips: reports.length, totalWorkingDays: days, totalEarned, totalPaid, totalPending, totalExpenses };
 }
 const SiteWork = mongoose.model('SiteWork', SiteWorkSchema);
 const WorkerReport = mongoose.model('WorkerReport', WorkerReportSchema);
@@ -1987,10 +1995,11 @@ app.get('/api/office-daily-report', async(req,res)=>{
     if (accessRole !== 'admin') return res.status(403).json({ message: 'Office daily report is available only to Admin and User' });
 
     await cleanupDuplicateProductionEntries();
-    const [sales, purchases, productionEntries] = await Promise.all([
+    const [sales, purchases, productionEntries, driverReports] = await Promise.all([
       Sales.find({ date }).sort({ createdAt: -1 }).lean(),
       Purchase.find({ date }).sort({ createdAt: -1 }).lean(),
       ProductionSiteEntry.find({ date, producedQty: { $exists: true, $gt: 0 } }).sort({ createdAt: -1 }).lean(),
+      DriverReport.find({ date }).sort({ createdAt: -1 }).lean(),
     ]);
 
     const productionItemMap = {};
@@ -2026,9 +2035,10 @@ app.get('/api/office-daily-report', async(req,res)=>{
       productionEarnings: productionEntries.reduce((sum, entry) => sum + (+(entry.totalAmount) || 0), 0),
       productionPayments: productionEntries.reduce((sum, entry) => sum + (+(entry.paymentGiven) || 0), 0),
       productionPending: productionEntries.reduce((sum, entry) => sum + (+(entry.amountPending ?? ((+(entry.totalAmount) || 0) - (+(entry.paymentGiven) || 0))) || 0), 0),
+      driverExpenseTotal: driverReports.reduce((sum, report) => sum + (Array.isArray(report.expenses) ? report.expenses : []).reduce((inner, e) => inner + (+(e.amount) || 0), 0), 0),
     };
     totals.cashReceived = totals.salesReceived;
-    totals.cashPaid = totals.purchasePaid + totals.productionPayments;
+    totals.cashPaid = totals.purchasePaid + totals.productionPayments + totals.driverExpenseTotal;
     totals.netCash = totals.cashReceived - totals.cashPaid;
 
     res.json({
@@ -2036,6 +2046,22 @@ app.get('/api/office-daily-report', async(req,res)=>{
       totals,
       sales,
       purchases,
+      driverReports,
+      driverExpenses: driverReports.flatMap(report => (Array.isArray(report.expenses) ? report.expenses : []).map(expense => ({
+        reportId: report._id,
+        date: report.date,
+        driverName: report.driverName,
+        driverMobile: report.driverMobile,
+        vehicleName: report.vehicleName,
+        vehicleNumber: report.vehicleNumber,
+        category: expense.category || 'Other',
+        amount: +(expense.amount) || 0,
+        note: expense.note || '',
+        tripCategory: report.category || '',
+        itemName: report.itemName || '',
+        loadingFrom: report.loadingFrom || '',
+        unloadedLocation: report.unloadedLocation || '',
+      }))),
       productionEntries,
       productionItemSummary: Object.values(productionItemMap).sort((a,b)=>a.item.localeCompare(b.item)),
       productionPayments: productionEntries
