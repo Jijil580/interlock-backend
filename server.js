@@ -714,6 +714,7 @@ app.delete('/api/sales/:id', async(req,res)=>{
     const sale = await Sales.findById(req.params.id);
     if (sale) await adjustStockFromSale(sale, 1);
     await Sales.findByIdAndDelete(req.params.id);
+    if (sale?.mobileNumber) await recalcCustomerTotals(normalizeMobile(sale.mobileNumber));
     res.json({ok:true});
   } catch(e) { res.status(400).json({ message: e.message }); }
 });
@@ -1722,6 +1723,15 @@ app.post('/api/purchases', async(req,res)=>{
     });
     await upsertSupplierFromPurchase(purchase, req.body.saveToSupplierMaster !== false);
     res.json(purchase);
+  } catch(e) { res.status(400).json({ message: e.message }); }
+});
+app.delete('/api/purchases/:id', async(req,res)=>{
+  try {
+    const purchase = await Purchase.findById(req.params.id);
+    if (!purchase) return res.status(404).json({ message: 'Purchase not found' });
+    await Purchase.findByIdAndDelete(req.params.id);
+    await recalcSupplierTotalsFromPurchases(purchase);
+    res.json({ ok: true });
   } catch(e) { res.status(400).json({ message: e.message }); }
 });
 
