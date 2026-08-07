@@ -45,7 +45,7 @@ const DriverReportSchema = new mongoose.Schema({
   loadingFrom:String, unloadedLocation:String, loadAmount:Number, cashGivenToSupplier:Number, supplierPendingCash:Number,
   expenses:[{category:String,amount:Number,liters:Number,note:String}],
   vehicleKm:{startKm:Number,endKm:Number,totalKm:Number,note:String},
-  driverChargeType:String, driverCharge:Number, driverWageEarned:Number, driverWagePaid:Number, driverWagePending:Number,
+  driverChargeType:String, driverCharge:Number, driverWageEarned:Number, driverWagePaid:Number, driverWagePending:Number, driverWageCredit:Number,
   payments:[{amount:Number,date:String,mode:String,note:String,addedBy:String}],
   remarks:String, addedBy:String, sourcePurchaseId:String, company:String
 }, {timestamps:true});
@@ -495,11 +495,35 @@ async function payDriverLedgerTotal({ driverName, driverMobile, amount, date, mo
     appliedRows.push({ reportId: report._id, applied });
     remaining -= applied;
   }
+  if (remaining > 0) {
+    let creditReport = await DriverReport.findOne(filter).sort({ date: -1, createdAt: -1 });
+    if (!creditReport) {
+      creditReport = await DriverReport.create({
+        date: date || new Date().toISOString().slice(0, 10),
+        driverName: driverName || '',
+        driverMobile: mobile || '',
+        category: 'Driver Payment',
+        itemName: 'Advance / Extra Payment',
+        driverChargeType: 'batha',
+        driverCharge: 0,
+        addedBy: addedBy || '',
+      });
+    }
+    creditReport.payments = [...(creditReport.payments || []), {
+      amount: remaining,
+      date: date || new Date().toISOString().slice(0, 10),
+      mode: mode || 'Cash',
+      note: note || 'Driver advance / extra payment',
+      addedBy: addedBy || '',
+    }];
+    await applyDriverWage(creditReport);
+    appliedRows.push({ reportId: creditReport._id, applied: remaining, credit: true });
+  }
   return appliedRows;
 }
 
 async function applyDriverWage(report) {
-  let earned = +(report.driverCharge) || 0;
+  let chargeEarned = +(report.driverCharge) || 0;
   if (report.driverChargeType === 'coolie') {
     const existing = await DriverReport.findOne({
       _id: { $ne: report._id },
@@ -508,11 +532,14 @@ async function applyDriverWage(report) {
       driverChargeType: 'coolie',
       driverWageEarned: { $gt: 0 }
     }).lean();
-    if (existing) earned = 0;
+    if (existing) chargeEarned = 0;
   }
+  const supplierCashPaidByDriver = +(report.cashGivenToSupplier) || 0;
+  const earned = chargeEarned + supplierCashPaidByDriver;
   report.driverWageEarned = earned;
   report.driverWagePaid = (report.payments || []).reduce((a, p) => a + (+(p.amount) || 0), 0);
   report.driverWagePending = Math.max(0, earned - (+(report.driverWagePaid) || 0));
+  report.driverWageCredit = Math.max(0, (+(report.driverWagePaid) || 0) - earned);
   await report.save();
   return report;
 }
@@ -571,16 +598,24 @@ async function syncDriverRawMaterialPurchase(report) {
 }
 
 function summarizeDriverReports(reports = []) {
-  const totalEarned = reports.reduce((a, r) => a + (+(r.driverWageEarned) || 0), 0);
+  const payableForDriverReport = (r) => {
+    const storedEarned = +(r.driverWageEarned) || 0;
+    const supplierCash = +(r.cashGivenToSupplier) || 0;
+    const charge = +(r.driverCharge) || 0;
+    return storedEarned >= (charge + supplierCash) ? storedEarned : storedEarned + supplierCash;
+  };
+  const totalEarned = reports.reduce((a, r) => a + payableForDriverReport(r), 0);
   const totalPaid = reports.reduce((a, r) => a + (+(r.driverWagePaid) || 0), 0);
+  const totalCredit = Math.max(0, totalPaid - totalEarned);
   const totalLoadAmount = reports.reduce((a, r) => a + (+(r.loadAmount) || 0), 0);
+  const totalSupplierCash = reports.reduce((a, r) => a + (+(r.cashGivenToSupplier) || 0), 0);
   const totalDriverExpenses = reports.reduce((a, r) => a + (Array.isArray(r.expenses) ? r.expenses : []).reduce((s, e) => s + (+(e.amount) || 0), 0), 0);
   const totalExpenses = totalDriverExpenses + totalLoadAmount;
   const totalLiters = reports.reduce((a, r) => a + (Array.isArray(r.expenses) ? r.expenses : []).reduce((s, e) => s + (+(e.liters) || 0), 0), 0);
   const totalKm = reports.reduce((a, r) => a + (+(r.vehicleKm?.totalKm) || 0), 0);
   const totalPending = Math.max(0, totalEarned - totalPaid);
   const days = new Set(reports.map(r => r.date).filter(Boolean)).size;
-  return { totalTrips: reports.length, totalWorkingDays: days, totalEarned, totalPaid, totalPending, totalExpenses, totalDriverExpenses, totalLoadAmount, totalLiters, totalKm };
+  return { totalTrips: reports.length, totalWorkingDays: days, totalEarned, totalPaid, totalPending, totalCredit, totalExpenses, totalDriverExpenses, totalLoadAmount, totalSupplierCash, totalLiters, totalKm };
 }
 const SiteWork = mongoose.model('SiteWork', SiteWorkSchema);
 const WorkerReport = mongoose.model('WorkerReport', WorkerReportSchema);
