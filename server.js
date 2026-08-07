@@ -768,10 +768,32 @@ app.put('/api/sales/:id', async(req,res)=>{
   try {
     if (!auditReasonOf(req)) return res.status(400).json({ message: 'Reason is required' });
     const oldSale = await Sales.findById(req.params.id);
+    if (!oldSale) return res.status(404).json({ message: 'Sale not found' });
     if (oldSale) await adjustStockFromSale(oldSale, 1);
-    const sale = await Sales.findByIdAndUpdate(req.params.id, req.body, {new:true});
+    const mobile = normalizeMobile(req.body.mobileNumber);
+    const quantity = +(req.body.quantity) || 0;
+    const productType = req.body.productType || oldSale.productType || 'interlock';
+    const sqftPerPiece = productType === 'hollowbrick' ? 0 : +(req.body.sqftPerPiece) || 0;
+    const sqftQty = productType === 'hollowbrick' ? 0 : +(req.body.sqftQty) || (quantity * sqftPerPiece);
+    const taxableAmount = +(req.body.taxableAmount) || Math.max(0, (+(req.body.total) || 0) - (+(req.body.cgstAmount) || 0) - (+(req.body.sgstAmount) || 0));
+    const cgstPercent = +(req.body.cgstPercent) || 0;
+    const sgstPercent = +(req.body.sgstPercent) || 0;
+    const cgstAmount = +(req.body.cgstAmount) || (taxableAmount * cgstPercent / 100);
+    const sgstAmount = +(req.body.sgstAmount) || (taxableAmount * sgstPercent / 100);
+    const total = +(req.body.total) || Math.max(0, taxableAmount + cgstAmount + sgstAmount);
+    const discount = +(req.body.discount) || 0;
+    const amountPaid = +(req.body.amountPaid) || 0;
+    const amountPending = Math.max(0, total - amountPaid);
+    const status = amountPending <= 0 ? 'paid' : amountPaid > 0 ? 'partial' : 'pending';
+    const sale = await Sales.findByIdAndUpdate(req.params.id, {
+      ...req.body, mobileNumber: mobile, productType, quantity, sqftPerPiece, sqftQty,
+      taxableAmount, cgstPercent, sgstPercent, cgstAmount, sgstAmount, total, discount, amountPaid, amountPending, status,
+    }, {new:true});
     if (sale) await adjustStockFromSale(sale, -1);
     await createReportAudit({ req, recordType: 'Sale', action: 'edit', before: oldSale, after: sale });
+    await upsertCustomerFromSale(sale, req.body.saveToCustomerMaster !== false);
+    if (oldSale?.mobileNumber) await recalcCustomerTotals(normalizeMobile(oldSale.mobileNumber));
+    if (sale?.mobileNumber) await recalcCustomerTotals(normalizeMobile(sale.mobileNumber));
     res.json(sale);
   } catch(e) { res.status(e.statusCode || 400).json({ message: e.message }); }
 });
@@ -1847,6 +1869,30 @@ app.post('/api/purchases', async(req,res)=>{
     await upsertSupplierFromPurchase(purchase, req.body.saveToSupplierMaster !== false);
     res.json(purchase);
   } catch(e) { res.status(400).json({ message: e.message }); }
+});
+app.put('/api/purchases/:id', async(req,res)=>{
+  try {
+    if (!auditReasonOf(req)) return res.status(400).json({ message: 'Reason is required' });
+    const oldPurchase = await Purchase.findById(req.params.id);
+    if (!oldPurchase) return res.status(404).json({ message: 'Purchase not found' });
+    const mobile = normalizeMobile(req.body.supplierMobile || req.body.supplierPhone);
+    const total = +(req.body.totalAmount) || 0;
+    const amountPaid = +(req.body.amountPaid) || 0;
+    const amountPending = Math.max(0, total - amountPaid);
+    const purchase = await Purchase.findByIdAndUpdate(req.params.id, {
+      ...req.body,
+      supplierMobile: mobile,
+      supplierPhone: mobile || req.body.supplierPhone,
+      totalAmount: total,
+      amountPaid,
+      amountPending,
+    }, { new: true });
+    await createReportAudit({ req, recordType: 'Purchase', action: 'edit', before: oldPurchase, after: purchase });
+    await upsertSupplierFromPurchase(purchase, req.body.saveToSupplierMaster !== false);
+    await recalcSupplierTotalsFromPurchases(oldPurchase);
+    await recalcSupplierTotalsFromPurchases(purchase);
+    res.json(purchase);
+  } catch(e) { res.status(e.statusCode || 400).json({ message: e.message }); }
 });
 app.delete('/api/purchases/:id', async(req,res)=>{
   try {
