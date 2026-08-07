@@ -49,6 +49,11 @@ const DriverReportSchema = new mongoose.Schema({
   payments:[{amount:Number,date:String,mode:String,note:String,addedBy:String}],
   remarks:String, addedBy:String, sourcePurchaseId:String, company:String
 }, {timestamps:true});
+const ReportAuditSchema = new mongoose.Schema({
+  recordType:String, recordId:String, action:String, reason:String, reasonType:String,
+  performedBy:String, performedRole:String, recordDate:String, title:String,
+  before:Object, after:Object,
+}, {timestamps:true});
 const ProductionSiteSchema = new mongoose.Schema({
   date:String, shift:String, workerId:String, workerName:String,
   itemId:String, itemName:String, category:String, shape:String, color:String, size:String, thickness:String, unitType:String,
@@ -77,6 +82,42 @@ function normalizeMobile(m) {
 
 function escapeRegex(v) {
   return String(v || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function auditReasonOf(req) {
+  return String(req.body?.auditReason || req.query?.auditReason || '').trim();
+}
+
+function auditTitle(type, doc = {}) {
+  if (!doc) return type;
+  if (type === 'Supervisor Daily Report') return `${doc.siteName || 'Site'} - ${doc.date || ''}`;
+  if (type === 'Driver Report') return `${doc.driverName || 'Driver'} - ${doc.date || ''}`;
+  if (type === 'Sale') return `${doc.invoiceNumber || doc.customer || 'Sale'} - ${doc.date || ''}`;
+  if (type === 'Purchase') return `${doc.supplierName || 'Purchase'} - ${doc.date || ''}`;
+  return doc.name || doc.title || type;
+}
+
+async function createReportAudit({ req, recordType, action, before, after }) {
+  const reason = auditReasonOf(req);
+  if (!reason) {
+    const error = new Error('Reason is required');
+    error.statusCode = 400;
+    throw error;
+  }
+  const source = after || before || {};
+  await ReportAudit.create({
+    recordType,
+    recordId: String(source._id || req.params?.id || ''),
+    action,
+    reason,
+    reasonType: req.body?.reasonType || req.query?.reasonType || action,
+    performedBy: req.body?.auditBy || req.query?.auditBy || req.body?.addedBy || '',
+    performedRole: req.body?.auditRole || req.query?.auditRole || '',
+    recordDate: source.date || source.startDate || '',
+    title: auditTitle(recordType, source),
+    before: before ? (before.toObject ? before.toObject() : before) : undefined,
+    after: after ? (after.toObject ? after.toObject() : after) : undefined,
+  });
 }
 
 function buildItemSummary(records, nameField) {
@@ -546,6 +587,7 @@ const WorkerPayment = mongoose.model('WorkerPayment', WorkerPaymentSchema);
 const Purchase = mongoose.model('Purchase', PurchaseSchema);
 const Supplier = mongoose.model('Supplier', SupplierSchema);
 const DriverReport = mongoose.model('DriverReport', DriverReportSchema);
+const ReportAudit = mongoose.model('ReportAudit', ReportAuditSchema);
 const MasterInterlock = mongoose.model('MasterInterlock', MasterDataSchema);
 const MasterHollowBrick = mongoose.model('MasterHollowBrick', MasterDataSchema);
 const MasterMaterial = mongoose.model('MasterMaterial', new mongoose.Schema({...MasterDataSchema.obj},{timestamps:true}));
@@ -724,21 +766,25 @@ app.post('/api/sales', async(req,res)=>{
 });
 app.put('/api/sales/:id', async(req,res)=>{
   try {
+    if (!auditReasonOf(req)) return res.status(400).json({ message: 'Reason is required' });
     const oldSale = await Sales.findById(req.params.id);
     if (oldSale) await adjustStockFromSale(oldSale, 1);
     const sale = await Sales.findByIdAndUpdate(req.params.id, req.body, {new:true});
     if (sale) await adjustStockFromSale(sale, -1);
+    await createReportAudit({ req, recordType: 'Sale', action: 'edit', before: oldSale, after: sale });
     res.json(sale);
-  } catch(e) { res.status(400).json({ message: e.message }); }
+  } catch(e) { res.status(e.statusCode || 400).json({ message: e.message }); }
 });
 app.delete('/api/sales/:id', async(req,res)=>{
   try {
+    if (!auditReasonOf(req)) return res.status(400).json({ message: 'Reason is required' });
     const sale = await Sales.findById(req.params.id);
     if (sale) await adjustStockFromSale(sale, 1);
+    await createReportAudit({ req, recordType: 'Sale', action: 'delete', before: sale });
     await Sales.findByIdAndDelete(req.params.id);
     if (sale?.mobileNumber) await recalcCustomerTotals(normalizeMobile(sale.mobileNumber));
     res.json({ok:true});
-  } catch(e) { res.status(400).json({ message: e.message }); }
+  } catch(e) { res.status(e.statusCode || 400).json({ message: e.message }); }
 });
 
 app.get('/api/quotations', async(req,res)=>{
@@ -922,6 +968,7 @@ app.post('/api/dailyreport', async(req,res)=>{
 });
 app.put('/api/dailyreport/:id', async(req,res)=>{
   try {
+    if (!auditReasonOf(req)) return res.status(400).json({ message: 'Reason is required' });
     const oldReport = await DailyReport.findById(req.params.id);
     const body = normalizeDailyReportBody(req.body);
     const workerValidation = await validateDailyReportSiteWorkers(body);
@@ -948,8 +995,26 @@ app.put('/api/dailyreport/:id', async(req,res)=>{
         if (site) await recalcSiteFinancials(site);
       } else await recalcSiteFinancials(key);
     }
+    await createReportAudit({ req, recordType: 'Supervisor Daily Report', action: 'edit', before: oldReport, after: newReport });
     res.json(newReport);
-  } catch(e) { res.status(400).json({ message: e.message }); }
+  } catch(e) { res.status(e.statusCode || 400).json({ message: e.message }); }
+});
+app.delete('/api/dailyreport/:id', async(req,res)=>{
+  try {
+    if (!auditReasonOf(req)) return res.status(400).json({ message: 'Reason is required' });
+    const report = await DailyReport.findById(req.params.id);
+    if (!report) return res.status(404).json({ message: 'Daily report not found' });
+    await createReportAudit({ req, recordType: 'Supervisor Daily Report', action: 'delete', before: report });
+    await DailyReport.findByIdAndDelete(req.params.id);
+    const workers = new Set((report.workerEntries || []).map(we => we.workerName).filter(Boolean));
+    for (const name of workers) await syncWorkerTotals(name);
+    if (report.siteId) await recalcSiteFinancials(report.siteId);
+    else if (report.siteName) {
+      const site = await SiteWork.findOne({ customerName: report.siteName });
+      if (site) await recalcSiteFinancials(site);
+    }
+    res.json({ ok: true });
+  } catch(e) { res.status(e.statusCode || 400).json({ message: e.message }); }
 });
 
 app.get('/api/workplan', async(req,res)=>{
@@ -1610,14 +1675,35 @@ app.post('/api/driverreports', async(req,res)=>{
 });
 app.put('/api/driverreports/:id', async(req,res)=>{
   try {
+    if (!auditReasonOf(req)) return res.status(400).json({ message: 'Reason is required' });
     const existing = await DriverReport.findById(req.params.id);
     if (!existing) return res.status(404).json({ message: 'Driver report not found' });
+    const before = existing.toObject();
     Object.assign(existing, normalizeDriverReport(req.body, existing));
     await existing.save();
     await applyDriverWage(existing);
     await syncDriverRawMaterialPurchase(existing);
-    res.json(await DriverReport.findById(existing._id));
-  } catch(e) { res.status(400).json({ message: e.message }); }
+    const updated = await DriverReport.findById(existing._id);
+    await createReportAudit({ req, recordType: 'Driver Report', action: 'edit', before, after: updated });
+    res.json(updated);
+  } catch(e) { res.status(e.statusCode || 400).json({ message: e.message }); }
+});
+app.delete('/api/driverreports/:id', async(req,res)=>{
+  try {
+    if (!auditReasonOf(req)) return res.status(400).json({ message: 'Reason is required' });
+    const report = await DriverReport.findById(req.params.id);
+    if (!report) return res.status(404).json({ message: 'Driver report not found' });
+    await createReportAudit({ req, recordType: 'Driver Report', action: 'delete', before: report });
+    if (report.sourcePurchaseId) {
+      const purchase = await Purchase.findById(report.sourcePurchaseId).catch(()=>null);
+      if (purchase) {
+        await Purchase.findByIdAndDelete(report.sourcePurchaseId);
+        await recalcSupplierTotalsFromPurchases(purchase);
+      }
+    }
+    await DriverReport.findByIdAndDelete(req.params.id);
+    res.json({ ok: true });
+  } catch(e) { res.status(e.statusCode || 400).json({ message: e.message }); }
 });
 app.post('/api/driverreports/:id/payment', async(req,res)=>{
   try {
@@ -1651,6 +1737,22 @@ app.post('/api/driverreports/payment', async(req,res)=>{
     const reports = await DriverReport.find(filter).sort({ date: -1, createdAt: -1 });
     res.json({ ok: true, applied, reports, summary: summarizeDriverReports(reports) });
   } catch(e) { res.status(400).json({ message: e.message }); }
+});
+
+app.get('/api/report-audits', async(req,res)=>{
+  try {
+    const { role, recordType, action, fromDate, toDate } = req.query;
+    if (role !== 'admin') return res.status(403).json({ message: 'Only admin can view report audit history' });
+    const filter = {};
+    if (recordType) filter.recordType = recordType;
+    if (action) filter.action = action;
+    if (fromDate || toDate) {
+      filter.createdAt = {};
+      if (fromDate) filter.createdAt.$gte = new Date(`${fromDate}T00:00:00.000Z`);
+      if (toDate) filter.createdAt.$lte = new Date(`${toDate}T23:59:59.999Z`);
+    }
+    res.json(await ReportAudit.find(filter).sort({ createdAt: -1 }).limit(300).lean());
+  } catch(e) { res.status(500).json({ message: e.message }); }
 });
 
 app.get('/api/workers/ledger', async(req,res)=>{
@@ -1748,12 +1850,14 @@ app.post('/api/purchases', async(req,res)=>{
 });
 app.delete('/api/purchases/:id', async(req,res)=>{
   try {
+    if (!auditReasonOf(req)) return res.status(400).json({ message: 'Reason is required' });
     const purchase = await Purchase.findById(req.params.id);
     if (!purchase) return res.status(404).json({ message: 'Purchase not found' });
+    await createReportAudit({ req, recordType: 'Purchase', action: 'delete', before: purchase });
     await Purchase.findByIdAndDelete(req.params.id);
     await recalcSupplierTotalsFromPurchases(purchase);
     res.json({ ok: true });
-  } catch(e) { res.status(400).json({ message: e.message }); }
+  } catch(e) { res.status(e.statusCode || 400).json({ message: e.message }); }
 });
 
 const masterModels = {interlock:MasterInterlock,hollowbricks:MasterHollowBrick,materials:MasterMaterial,labor:MasterLabor,extrawork:MasterExtraWork};
