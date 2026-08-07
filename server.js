@@ -34,7 +34,7 @@ const WorkerReportSchema = new mongoose.Schema({ siteName:String, phoneNo:String
 const DailyReportSchema = new mongoose.Schema({ date:String, siteName:String, siteId:String, siteStatus:String, workersCount:String, totalArea:String, completedToday:String, totalCompleted:String, interlockType:String, dayNotes:String, materialsUnloaded:String, materialQty:String, equipment:String, supplierName:String, materialRemarks:String, extraWorkDesc:String, extraWorkQty:String, extraWorkCost:String, extraWorkRemarks:String, workerEntries:[{workerName:String,attendance:String,dutyArea:String,workDone:String,salary:Number,amountEarned:Number,paymentGiven:Number,pending:Number,remarks:String,workCategory:String,workArea:Number,unit:String,rate:Number,paymentMode:String}], payments:Array, totalPayments:Number, totalReceived:Number, complaints:String, actionTaken:String, complaintRemarks:String, addedBy:String, newSite:String, runningSite:String, workersDetail:String, materialSupply:String, dayNote:String, expenses:String, workerPayments:[{workerName:String,amount:Number,date:String,note:String}] }, {timestamps:true});
 const WorkPlanSchema = new mongoose.Schema({ date:String, siteName:String, task:String, workers:String, materials:String, note:String, status:{type:String,default:'planned'}, fromDate:String, toDate:String, site:String, plannedWork:String, supervisor:String, workersAllocated:String, materialsNeeded:String, estimatedCost:Number, paymentPlan:String, notes:String, archived:{type:Boolean,default:false}, addedBy:String }, {timestamps:true});
 const WorkerSchema = new mongoose.Schema({ name:String, phone:String, address:String, role:String, workerType:String, workerCategory:String, status:{type:String,default:'Active'}, workLocationType:String, paymentType:String, customPaymentType:String, rateType:String, rateAmount:Number, totalProduction:{type:Number,default:0}, totalEarnings:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
-const WorkerPaymentSchema = new mongoose.Schema({ workerName:String, amount:Number, date:String, note:String, addedBy:String, source:String, reportDate:String }, {timestamps:true});
+const WorkerPaymentSchema = new mongoose.Schema({ workerName:String, amount:Number, date:String, mode:String, note:String, addedBy:String, source:String, reportDate:String }, {timestamps:true});
 const PurchaseSchema = new mongoose.Schema({ date:String, supplierName:String, supplierPhone:String, supplierMobile:String, supplierAddress:String, itemName:String, itemType:String, quantity:String, unit:String, unitPrice:String, totalAmount:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, vehicleNumber:String, vehicleType:String, driverName:String, driverPhone:String, deliveryAddress:String, note:String, addedBy:String, source:String, sourceId:String }, {timestamps:true});
 const SupplierSchema = new mongoose.Schema({ name:String, mobile:String, phone:String, address:String, location:String, materialType:String, materials:[String], customMaterial:String, gstNumber:String, notes:String, note:String, totalPurchases:{type:Number,default:0}, totalPurchaseAmount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
 const MasterDataSchema = new mongoose.Schema({ name:String, category:String, shape:String, color:String, size:String, thickness:String, sqftPerPiece:Number, boxCount:Number, pricePerSqft:Number, pricePerSqm:Number, unit:String, price:Number, stock:Number, rate:Number, rateType:String, description:String, notes:String, addedBy:String }, {timestamps:true});
@@ -42,7 +42,7 @@ const DriverReportSchema = new mongoose.Schema({
   date:String, driverName:String, driverMobile:String, vehicleName:String, vehicleNumber:String,
   category:String, itemId:String, itemName:String, itemDetails:String, quantity:Number, unit:String,
   supplierId:String, supplierName:String, supplierMobile:String, supplierAddress:String, saveToSupplierMaster:Boolean,
-  loadingFrom:String, unloadedLocation:String, cashGivenToSupplier:Number, supplierPendingCash:Number,
+  loadingFrom:String, unloadedLocation:String, loadAmount:Number, cashGivenToSupplier:Number, supplierPendingCash:Number,
   expenses:[{category:String,amount:Number,liters:Number,note:String}],
   vehicleKm:{startKm:Number,endKm:Number,totalKm:Number,note:String},
   driverChargeType:String, driverCharge:Number, driverWageEarned:Number, driverWagePaid:Number, driverWagePending:Number,
@@ -400,7 +400,8 @@ function normalizeDriverReport(body = {}, existing = null) {
   const directPaid = +(body.driverWagePaid) || 0;
   const driverWagePaid = Math.max(paidFromHistory, directPaid);
   const cashGivenToSupplier = +(body.cashGivenToSupplier) || 0;
-  const totalAmount = +(body.totalAmount) || cashGivenToSupplier + (+(body.supplierPendingCash) || 0);
+  const loadAmount = +(body.loadAmount) || 0;
+  const totalAmount = loadAmount || +(body.totalAmount) || cashGivenToSupplier + (+(body.supplierPendingCash) || 0);
   const expenses = (Array.isArray(body.expenses) ? body.expenses : []).map(e => ({
     category: e.category || 'Other',
     amount: +(e.amount) || 0,
@@ -423,6 +424,7 @@ function normalizeDriverReport(body = {}, existing = null) {
     supplierMobile: normalizeMobile(body.supplierMobile || body.supplierPhone),
     category: body.category || 'Other',
     quantity: +(body.quantity) || 0,
+    loadAmount,
     cashGivenToSupplier,
     supplierPendingCash: Math.max(0, totalAmount - cashGivenToSupplier),
     expenses,
@@ -539,7 +541,7 @@ async function syncDriverRawMaterialPurchase(report) {
     quantity: String(report.quantity || ''),
     unit: report.unit || '',
     unitPrice: '',
-    totalAmount: (+(report.cashGivenToSupplier) || 0) + (+(report.supplierPendingCash) || 0),
+    totalAmount: (+(report.loadAmount) || 0) || ((+(report.cashGivenToSupplier) || 0) + (+(report.supplierPendingCash) || 0)),
     amountPaid: +(report.cashGivenToSupplier) || 0,
     amountPending: +(report.supplierPendingCash) || 0,
     paymentMode: 'Cash',
@@ -571,12 +573,14 @@ async function syncDriverRawMaterialPurchase(report) {
 function summarizeDriverReports(reports = []) {
   const totalEarned = reports.reduce((a, r) => a + (+(r.driverWageEarned) || 0), 0);
   const totalPaid = reports.reduce((a, r) => a + (+(r.driverWagePaid) || 0), 0);
-  const totalExpenses = reports.reduce((a, r) => a + (Array.isArray(r.expenses) ? r.expenses : []).reduce((s, e) => s + (+(e.amount) || 0), 0), 0);
+  const totalLoadAmount = reports.reduce((a, r) => a + (+(r.loadAmount) || 0), 0);
+  const totalDriverExpenses = reports.reduce((a, r) => a + (Array.isArray(r.expenses) ? r.expenses : []).reduce((s, e) => s + (+(e.amount) || 0), 0), 0);
+  const totalExpenses = totalDriverExpenses + totalLoadAmount;
   const totalLiters = reports.reduce((a, r) => a + (Array.isArray(r.expenses) ? r.expenses : []).reduce((s, e) => s + (+(e.liters) || 0), 0), 0);
   const totalKm = reports.reduce((a, r) => a + (+(r.vehicleKm?.totalKm) || 0), 0);
   const totalPending = Math.max(0, totalEarned - totalPaid);
   const days = new Set(reports.map(r => r.date).filter(Boolean)).size;
-  return { totalTrips: reports.length, totalWorkingDays: days, totalEarned, totalPaid, totalPending, totalExpenses, totalLiters, totalKm };
+  return { totalTrips: reports.length, totalWorkingDays: days, totalEarned, totalPaid, totalPending, totalExpenses, totalDriverExpenses, totalLoadAmount, totalLiters, totalKm };
 }
 const SiteWork = mongoose.model('SiteWork', SiteWorkSchema);
 const WorkerReport = mongoose.model('WorkerReport', WorkerReportSchema);
@@ -1345,8 +1349,8 @@ async function updateWorkerEarnings(workerName, qty, amount) {
   return await Worker.findOne({ name: workerName });
 }
 
-async function recordWorkerPayment(workerName, amount, date, source, addedBy, note) {
-  const payment = await WorkerPayment.create({ workerName, amount, date, source: source || 'manual', addedBy, note });
+async function recordWorkerPayment(workerName, amount, date, source, addedBy, note, mode = 'Cash') {
+  const payment = await WorkerPayment.create({ workerName, amount, date, source: source || 'manual', addedBy, note, mode });
   await syncWorkerTotals(workerName);
   return payment;
 }
@@ -1661,9 +1665,9 @@ async function buildWorkerLedger(workerName, dateFilter = {}) {
 app.get('/api/workerpayments', async(req,res)=>res.json(await WorkerPayment.find().sort({date:-1})));
 app.post('/api/workerpayments', async(req,res)=>{
   try {
-    const { workerName, amount, date, note, addedBy, source } = req.body;
+    const { workerName, amount, date, mode, note, addedBy, source } = req.body;
     if (!workerName || !amount) return res.status(400).json({ message: 'Worker name and amount required' });
-    const payment = await recordWorkerPayment(workerName, +(amount), date || new Date().toISOString().split('T')[0], source || 'worker-payment', addedBy, note);
+    const payment = await recordWorkerPayment(workerName, +(amount), date || new Date().toISOString().split('T')[0], source || 'worker-payment', addedBy, note, mode || 'Cash');
     res.json(payment);
   } catch(e) { res.status(400).json({ message: e.message }); }
 });
