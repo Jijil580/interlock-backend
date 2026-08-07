@@ -36,6 +36,7 @@ const WorkPlanSchema = new mongoose.Schema({ date:String, siteName:String, task:
 const WorkerSchema = new mongoose.Schema({ name:String, phone:String, address:String, role:String, workerType:String, workerCategory:String, status:{type:String,default:'Active'}, workLocationType:String, paymentType:String, customPaymentType:String, rateType:String, rateAmount:Number, totalProduction:{type:Number,default:0}, totalEarnings:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
 const WorkerPaymentSchema = new mongoose.Schema({ workerName:String, amount:Number, date:String, mode:String, note:String, addedBy:String, source:String, reportDate:String }, {timestamps:true});
 const PurchaseSchema = new mongoose.Schema({ date:String, supplierName:String, supplierPhone:String, supplierMobile:String, supplierAddress:String, itemName:String, itemType:String, quantity:String, unit:String, unitPrice:String, totalAmount:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, vehicleNumber:String, vehicleType:String, driverName:String, driverPhone:String, deliveryAddress:String, note:String, addedBy:String, source:String, sourceId:String }, {timestamps:true});
+const CompanyPurchaseSchema = new mongoose.Schema({ date:String, materialName:String, quantity:Number, unit:String, amount:Number, paymentMode:String, accountName:String, note:String, purchasedBy:String, purchasedByRole:String }, {timestamps:true});
 const SupplierSchema = new mongoose.Schema({ name:String, mobile:String, phone:String, address:String, location:String, materialType:String, materials:[String], customMaterial:String, gstNumber:String, notes:String, note:String, totalPurchases:{type:Number,default:0}, totalPurchaseAmount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
 const MasterDataSchema = new mongoose.Schema({ name:String, category:String, shape:String, color:String, size:String, thickness:String, sqftPerPiece:Number, boxCount:Number, pricePerSqft:Number, pricePerSqm:Number, unit:String, price:Number, stock:Number, rate:Number, rateType:String, description:String, notes:String, addedBy:String }, {timestamps:true});
 const DriverReportSchema = new mongoose.Schema({
@@ -624,6 +625,7 @@ const WorkPlan = mongoose.model('WorkPlan', WorkPlanSchema);
 const Worker = mongoose.model('Worker', WorkerSchema);
 const WorkerPayment = mongoose.model('WorkerPayment', WorkerPaymentSchema);
 const Purchase = mongoose.model('Purchase', PurchaseSchema);
+const CompanyPurchase = mongoose.model('CompanyPurchase', CompanyPurchaseSchema);
 const Supplier = mongoose.model('Supplier', SupplierSchema);
 const DriverReport = mongoose.model('DriverReport', DriverReportSchema);
 const ReportAudit = mongoose.model('ReportAudit', ReportAuditSchema);
@@ -1943,6 +1945,157 @@ app.delete('/api/purchases/:id', async(req,res)=>{
     await recalcSupplierTotalsFromPurchases(purchase);
     res.json({ ok: true });
   } catch(e) { res.status(e.statusCode || 400).json({ message: e.message }); }
+});
+
+app.get('/api/company-purchases', async(req,res)=>{
+  try {
+    const { role, userName, date, fromDate, toDate } = req.query;
+    const filter = {};
+    if (date) filter.date = date;
+    if (fromDate || toDate) {
+      filter.date = {};
+      if (fromDate) filter.date.$gte = fromDate;
+      if (toDate) filter.date.$lte = toDate;
+    }
+    if (role === 'supervisor' && userName) filter.purchasedBy = userName;
+    res.json(await CompanyPurchase.find(filter).sort({ date: -1, createdAt: -1 }).lean());
+  } catch(e) { res.status(500).json({ message: e.message }); }
+});
+
+app.post('/api/company-purchases', async(req,res)=>{
+  try {
+    const amount = +(req.body.amount) || 0;
+    if (!req.body.materialName || amount <= 0) return res.status(400).json({ message: 'Material name and amount required' });
+    const purchase = await CompanyPurchase.create({
+      date: req.body.date || new Date().toISOString().slice(0, 10),
+      materialName: req.body.materialName,
+      quantity: +(req.body.quantity) || 0,
+      unit: req.body.unit || '',
+      amount,
+      paymentMode: req.body.paymentMode || 'Cash',
+      accountName: req.body.accountName || req.body.purchasedBy || '',
+      note: req.body.note || '',
+      purchasedBy: req.body.purchasedBy || req.body.addedBy || '',
+      purchasedByRole: req.body.purchasedByRole || req.body.role || '',
+    });
+    res.json(purchase);
+  } catch(e) { res.status(400).json({ message: e.message }); }
+});
+
+app.get('/api/company-expenses', async(req,res)=>{
+  try {
+    const { tab = 'salary', date, fromDate, toDate } = req.query;
+    const inRange = (value) => {
+      if (!value) return false;
+      if (date) return value === date;
+      if (fromDate && value < fromDate) return false;
+      if (toDate && value > toDate) return false;
+      return true;
+    };
+
+    const [dailyReports, productionEntries, workerPayments, driverReports, companyPurchases] = await Promise.all([
+      DailyReport.find({}).lean(),
+      ProductionSiteEntry.find({}).lean(),
+      WorkerPayment.find({}).lean(),
+      DriverReport.find({}).lean(),
+      CompanyPurchase.find({}).lean(),
+    ]);
+
+    const salaryRows = [];
+    dailyReports.forEach(report => {
+      if (!inRange(report.date)) return;
+      (report.workerEntries || []).forEach(worker => {
+        const amount = +(worker.paymentGiven) || 0;
+        if (amount > 0) salaryRows.push({
+          date: report.date, personName: worker.workerName, role: 'Site Worker',
+          source: 'Supervisor Daily Report', siteName: report.siteName, category: worker.workCategory || '',
+          earned: +(worker.amountEarned || worker.salary || 0), paid: amount,
+          pending: +(worker.pending) || 0, mode: worker.paymentMode || 'Cash',
+          paidBy: report.addedBy || '', details: `${worker.workArea || 0} ${worker.unit || ''} @ ${worker.rate || 0}`,
+        });
+      });
+    });
+    productionEntries.forEach(entry => {
+      if (!inRange(entry.date)) return;
+      const amount = +(entry.paymentGiven) || 0;
+      if (amount > 0) salaryRows.push({
+        date: entry.date, personName: entry.workerName, role: 'Production Worker',
+        source: 'Production Site', itemName: entry.itemName, category: entry.category || '',
+        earned: +(entry.totalAmount) || 0, paid: amount,
+        pending: +(entry.amountPending) || 0, mode: 'Cash',
+        paidBy: entry.addedBy || '', details: `${entry.producedQty || 0} ${entry.unit || entry.unitType || ''}`,
+      });
+    });
+    workerPayments.forEach(payment => {
+      if (!inRange(payment.date)) return;
+      salaryRows.push({
+        date: payment.date, personName: payment.workerName, role: payment.source?.includes('production') ? 'Production Worker' : 'Site Worker',
+        source: 'Worker Payment', earned: 0, paid: +(payment.amount) || 0,
+        pending: 0, mode: payment.mode || 'Cash', paidBy: payment.addedBy || '', details: payment.note || payment.source || '',
+      });
+    });
+    driverReports.forEach(report => {
+      if (!inRange(report.date)) return;
+      const paid = +(report.driverWagePaid) || 0;
+      if (paid > 0) salaryRows.push({
+        date: report.date, personName: report.driverName, role: 'Driver',
+        source: 'Driver Payment', itemName: report.itemName || '', category: report.category || '',
+        earned: +(report.driverWageEarned) || 0, paid,
+        pending: +(report.driverWagePending) || 0, credit: +(report.driverWageCredit) || 0,
+        mode: (report.payments || []).slice(-1)[0]?.mode || 'Cash',
+        paidBy: (report.payments || []).slice(-1)[0]?.addedBy || report.addedBy || '',
+        details: `${report.vehicleNumber || ''} ${report.loadingFrom || ''} to ${report.unloadedLocation || ''}`,
+      });
+    });
+
+    const otherRows = [];
+    dailyReports.forEach(report => {
+      if (!inRange(report.date)) return;
+      (report.payments || []).forEach(payment => {
+        const kind = String(payment.type || '').toLowerCase();
+        if (!['material payment', 'equipment payment', 'vehicle charge', 'other expense'].includes(kind)) return;
+        otherRows.push({
+          date: report.date, type: payment.type, name: payment.materialName || payment.equipmentName || payment.expenseName || payment.supplierName || 'Expense',
+          quantity: '', amount: +(payment.amount) || 0, mode: payment.mode || 'Cash',
+          purchasedBy: report.addedBy || '', source: 'Supervisor Daily Report',
+          details: payment.remarks || payment.supplierName || payment.receivedFrom || report.siteName || '',
+        });
+      });
+    });
+    driverReports.forEach(report => {
+      if (!inRange(report.date)) return;
+      (report.expenses || []).forEach(expense => {
+        otherRows.push({
+          date: report.date, type: `Driver ${expense.category || 'Expense'}`, name: report.driverName || 'Driver',
+          quantity: +(expense.liters) || '', amount: +(expense.amount) || 0, mode: 'Cash',
+          purchasedBy: report.addedBy || report.driverName || '', source: 'Driver Report',
+          details: expense.note || `${report.vehicleNumber || ''} ${report.itemName || ''}`,
+        });
+      });
+    });
+    companyPurchases.forEach(purchase => {
+      if (!inRange(purchase.date)) return;
+      otherRows.push({
+        date: purchase.date, type: 'Company Purchase', name: purchase.materialName,
+        quantity: `${purchase.quantity || 0} ${purchase.unit || ''}`.trim(), amount: +(purchase.amount) || 0,
+        mode: purchase.paymentMode || 'Cash', purchasedBy: purchase.purchasedBy || '', source: 'Company Purchase',
+        details: purchase.note || purchase.accountName || '',
+      });
+    });
+
+    const rows = tab === 'other' ? otherRows : salaryRows;
+    res.json({
+      tab,
+      rows: rows.sort((a,b)=>(b.date || '').localeCompare(a.date || '')),
+      totals: {
+        count: rows.length,
+        paid: rows.reduce((a,r)=>a+(+(r.paid ?? r.amount) || 0),0),
+        earned: salaryRows.reduce((a,r)=>a+(+(r.earned)||0),0),
+        pending: salaryRows.reduce((a,r)=>a+(+(r.pending)||0),0),
+        credit: salaryRows.reduce((a,r)=>a+(+(r.credit)||0),0),
+      },
+    });
+  } catch(e) { res.status(500).json({ message: e.message }); }
 });
 
 const masterModels = {interlock:MasterInterlock,hollowbricks:MasterHollowBrick,materials:MasterMaterial,labor:MasterLabor,extrawork:MasterExtraWork};
