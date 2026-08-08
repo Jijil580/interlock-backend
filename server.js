@@ -38,6 +38,7 @@ const WorkerPaymentSchema = new mongoose.Schema({ workerName:String, amount:Numb
 const PurchaseSchema = new mongoose.Schema({ date:String, supplierName:String, supplierPhone:String, supplierMobile:String, supplierAddress:String, itemName:String, itemType:String, quantity:String, unit:String, unitPrice:String, totalAmount:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, vehicleNumber:String, vehicleType:String, driverName:String, driverPhone:String, deliveryAddress:String, note:String, addedBy:String, source:String, sourceId:String }, {timestamps:true});
 const CompanyPurchaseSchema = new mongoose.Schema({ date:String, materialName:String, quantity:Number, unit:String, amount:Number, paymentMode:String, accountName:String, note:String, purchasedBy:String, purchasedByRole:String }, {timestamps:true});
 const SupervisorCashReceiptSchema = new mongoose.Schema({ date:String, supervisorName:String, amount:Number, paymentMode:String, receivedBy:String, receivedByRole:String, note:String }, {timestamps:true});
+const AdminCashTransferSchema = new mongoose.Schema({ date:String, direction:String, adminName:String, officeName:String, amount:Number, paymentMode:String, note:String, addedBy:String, addedByRole:String }, {timestamps:true});
 const SupplierSchema = new mongoose.Schema({ name:String, mobile:String, phone:String, address:String, location:String, materialType:String, materials:[String], customMaterial:String, gstNumber:String, notes:String, note:String, totalPurchases:{type:Number,default:0}, totalPurchaseAmount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
 const MasterDataSchema = new mongoose.Schema({ name:String, category:String, shape:String, color:String, size:String, thickness:String, sqftPerPiece:Number, boxCount:Number, pricePerSqft:Number, pricePerSqm:Number, unit:String, price:Number, stock:Number, rate:Number, rateType:String, description:String, notes:String, addedBy:String }, {timestamps:true});
 const DriverReportSchema = new mongoose.Schema({
@@ -628,6 +629,7 @@ const WorkerPayment = mongoose.model('WorkerPayment', WorkerPaymentSchema);
 const Purchase = mongoose.model('Purchase', PurchaseSchema);
 const CompanyPurchase = mongoose.model('CompanyPurchase', CompanyPurchaseSchema);
 const SupervisorCashReceipt = mongoose.model('SupervisorCashReceipt', SupervisorCashReceiptSchema);
+const AdminCashTransfer = mongoose.model('AdminCashTransfer', AdminCashTransferSchema);
 const Supplier = mongoose.model('Supplier', SupplierSchema);
 const DriverReport = mongoose.model('DriverReport', DriverReportSchema);
 const ReportAudit = mongoose.model('ReportAudit', ReportAuditSchema);
@@ -2024,6 +2026,46 @@ app.post('/api/supervisor-cash-receipts', async(req,res)=>{
   } catch(e) { res.status(400).json({ message: e.message }); }
 });
 
+app.get('/api/admin-cash-transfers', async(req,res)=>{
+  try {
+    const { role, name, adminName, officeName, direction, date, fromDate, toDate } = req.query;
+    const filter = {};
+    if (adminName) filter.adminName = adminName;
+    if (officeName) filter.officeName = officeName;
+    if (direction) filter.direction = direction;
+    if (date) filter.date = date;
+    if (fromDate || toDate) {
+      filter.date = {};
+      if (fromDate) filter.date.$gte = fromDate;
+      if (toDate) filter.date.$lte = toDate;
+    }
+    if (role === 'user' && name) filter.officeName = name;
+    res.json(await AdminCashTransfer.find(filter).sort({ date: -1, createdAt: -1 }).lean());
+  } catch(e) { res.status(500).json({ message: e.message }); }
+});
+
+app.post('/api/admin-cash-transfers', async(req,res)=>{
+  try {
+    const amount = +(req.body.amount) || 0;
+    const direction = req.body.direction === 'admin_to_office' ? 'admin_to_office' : 'office_to_admin';
+    if (!req.body.adminName || !req.body.officeName || amount <= 0) {
+      return res.status(400).json({ message: 'Admin, office user and amount required' });
+    }
+    const transfer = await AdminCashTransfer.create({
+      date: req.body.date || new Date().toISOString().slice(0, 10),
+      direction,
+      adminName: req.body.adminName,
+      officeName: req.body.officeName,
+      amount,
+      paymentMode: req.body.paymentMode || 'Cash',
+      note: req.body.note || '',
+      addedBy: req.body.addedBy || '',
+      addedByRole: req.body.addedByRole || req.body.role || '',
+    });
+    res.json(transfer);
+  } catch(e) { res.status(400).json({ message: e.message }); }
+});
+
 app.get('/api/company-expenses', async(req,res)=>{
   try {
     const { tab = 'salary', date, fromDate, toDate } = req.query;
@@ -2628,6 +2670,7 @@ function cashFlowRow(map, date, person, personRole) {
       received: 0, salesAmount: 0, customerPayments: 0,
       workerPayments: 0, vehicleCharges: 0, materialPayments: 0,
       equipmentPayments: 0, purchasePayments: 0, otherExpenses: 0, cashHandovers: 0,
+      adminCashGiven: 0, adminCashReceived: 0,
       totalExpenses: 0, netBalance: 0,
       receivedDetails: [], spentDetails: [], salesDetails: [], purchaseDetails: [],
     };
@@ -2733,12 +2776,20 @@ app.get('/api/cashflow', async(req,res)=>{
       }
       const receiptFilter = { receivedBy: accessRole === 'admin' ? { $in: officeNames } : name };
       if (date) receiptFilter.date = date;
-      const [sales, purchases, productionEntries, expenseReports, supervisorCashReceipts] = await Promise.all([
+      const isOfficeUserRequest = role === 'user';
+      const adminTransferFilter = isOfficeUserRequest
+        ? { officeName: name }
+        : accessRole === 'admin'
+        ? { $or: [{ officeName: { $in: officeNames } }, { adminName: { $in: officeNames } }] }
+        : { officeName: name };
+      if (date) adminTransferFilter.date = date;
+      const [sales, purchases, productionEntries, expenseReports, supervisorCashReceipts, adminCashTransfers] = await Promise.all([
         Sales.find(salesFilter).lean(),
         Purchase.find(purchaseFilter).lean(),
         ProductionSiteEntry.find(productionFilter).lean(),
         DailyReport.find(expenseFilter).lean(),
         SupervisorCashReceipt.find(receiptFilter).lean(),
+        AdminCashTransfer.find(adminTransferFilter).lean(),
       ]);
       sales.forEach(sale => {
         const owner = sale.addedBy || 'Unknown';
@@ -2780,11 +2831,37 @@ app.get('/api/cashflow', async(req,res)=>{
         row.received += amount;
         row.receivedDetails.push({ date: receipt.date, site: receipt.supervisorName, source: 'Cash Received From Supervisor', amount, paymentMode: receipt.paymentMode || '', fromName: receipt.supervisorName, note: receipt.note || '' });
       });
+      adminCashTransfers.forEach(transfer => {
+        const amount = +(transfer.amount) || 0;
+        const isAdminToOffice = transfer.direction === 'admin_to_office';
+        if ((isOfficeUserRequest ? transfer.officeName === name : (accessRole !== 'admin' || officeNames.includes(transfer.officeName))) && transfer.officeName) {
+          const officeRow = cashFlowRow(rows, transfer.date || '', transfer.officeName, 'user');
+          if (isAdminToOffice) {
+            officeRow.received += amount;
+            officeRow.adminCashReceived += amount;
+            officeRow.receivedDetails.push({ date: transfer.date, site: transfer.adminName, source: 'Cash Received From Admin', amount, paymentMode: transfer.paymentMode || '', note: transfer.note || '' });
+          } else {
+            officeRow.adminCashGiven += amount;
+            officeRow.spentDetails.push({ date: transfer.date, type: 'Cash Given To Admin', details: `${transfer.adminName || 'Admin'}${transfer.note ? ` - ${transfer.note}` : ''}`, amount });
+          }
+        }
+        if (!isOfficeUserRequest && accessRole === 'admin' && officeNames.includes(transfer.adminName) && transfer.adminName) {
+          const adminRow = cashFlowRow(rows, transfer.date || '', transfer.adminName, 'admin');
+          if (isAdminToOffice) {
+            adminRow.adminCashGiven += amount;
+            adminRow.spentDetails.push({ date: transfer.date, type: 'Cash Given To Office', details: `${transfer.officeName || 'Office'}${transfer.note ? ` - ${transfer.note}` : ''}`, amount });
+          } else {
+            adminRow.received += amount;
+            adminRow.adminCashReceived += amount;
+            adminRow.receivedDetails.push({ date: transfer.date, site: transfer.officeName, source: 'Cash Received From Office', amount, paymentMode: transfer.paymentMode || '', note: transfer.note || '' });
+          }
+        }
+      });
     }
 
     const history = Object.values(rows).map(row => {
       const supervisorExpenses = row.workerPayments + row.vehicleCharges + row.materialPayments + row.equipmentPayments + row.otherExpenses + row.cashHandovers;
-      const userExpenses = row.purchasePayments + row.workerPayments + row.otherExpenses;
+      const userExpenses = row.purchasePayments + row.workerPayments + row.otherExpenses + row.adminCashGiven;
       row.totalExpenses = row.personRole === 'supervisor' ? supervisorExpenses : userExpenses;
       row.netBalance = row.received - row.totalExpenses;
       return row;
@@ -2798,6 +2875,7 @@ app.get('/api/cashflow', async(req,res)=>{
       workerPayments: 0, vehicleCharges: 0, materialPayments: 0,
       equipmentPayments: 0, purchasePayments: 0, otherExpenses: 0,
       cashHandovers: 0,
+      adminCashGiven: 0, adminCashReceived: 0,
       totalExpenses: 0, netBalance: 0,
     });
 
@@ -2824,6 +2902,7 @@ const exportSources = () => ({
   workerPayments: WorkerPayment,
   purchases: Purchase,
   supervisorCashReceipts: SupervisorCashReceipt,
+  adminCashTransfers: AdminCashTransfer,
   suppliers: Supplier,
   driverReports: DriverReport,
   masterInterlocks: MasterInterlock,
