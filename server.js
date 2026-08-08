@@ -31,12 +31,13 @@ const QuotationSchema = new mongoose.Schema({
 const CustomerSchema = new mongoose.Schema({ mobile:{type:String,unique:true}, name:String, address:String, gstNumber:String, notes:String, totalPurchases:{type:Number,default:0}, totalSalesAmount:{type:Number,default:0}, totalDiscount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, totalQuantity:{type:Number,default:0}, company:String, addedBy:String }, {timestamps:true});
 const SiteWorkSchema = new mongoose.Schema({ customerName:String, phone:String, siteLocation:String, location:String, interlockType:String, interlockColor:String, selectedWorkers:[String], startDate:String, endDate:String, status:{type:String,default:'running'}, workUnit:String, workSize:String, ratePerUnit:String, baseWorkCost:String, extraWork:Array, extraMaterials:Array, materialCost:String, laborCost:String, totalCost:String, payments:Array, totalReceived:Number, pendingAmount:String, paymentStatus:{type:String,default:'pending'}, paymentMode:String, note:String, addedBy:String, workStatus:String, totalAmount:Number, paidAmount:Number, company:String }, {timestamps:true});
 const WorkerReportSchema = new mongoose.Schema({ siteName:String, phoneNo:String, startingDate:String, workerName:String, totalArea:String, workingCost:String, extraWork:String, extraMaterial:String, totalWorkingArea:String, totalAmount:String, note:String, paymentMode:String, upiId:String, bankName:String, bankBranch:String, bankAccount:String, amountReceivedBy:String, materialSupply:String, materialType:String, signatures:{supervisor:Boolean,office:Boolean,admin:Boolean}, addedBy:String }, {timestamps:true});
-const DailyReportSchema = new mongoose.Schema({ date:String, siteName:String, siteId:String, siteStatus:String, workersCount:String, totalArea:String, completedToday:String, totalCompleted:String, interlockType:String, dayNotes:String, materialsUnloaded:String, materialQty:String, equipment:String, supplierName:String, materialRemarks:String, extraWorkDesc:String, extraWorkQty:String, extraWorkCost:String, extraWorkRemarks:String, workerEntries:[{workerName:String,attendance:String,dutyArea:String,workDone:String,salary:Number,amountEarned:Number,paymentGiven:Number,pending:Number,remarks:String,workCategory:String,workArea:Number,unit:String,rate:Number,paymentMode:String}], payments:Array, totalPayments:Number, totalReceived:Number, complaints:String, actionTaken:String, complaintRemarks:String, addedBy:String, newSite:String, runningSite:String, workersDetail:String, materialSupply:String, dayNote:String, expenses:String, workerPayments:[{workerName:String,amount:Number,date:String,note:String}] }, {timestamps:true});
+const DailyReportSchema = new mongoose.Schema({ date:String, siteName:String, siteId:String, siteStatus:String, workersCount:String, totalArea:String, completedToday:String, totalCompleted:String, interlockType:String, dayNotes:String, materialsUnloaded:String, materialQty:String, equipment:String, supplierName:String, materialRemarks:String, extraWorkDesc:String, extraWorkQty:String, extraWorkCost:String, extraWorkRemarks:String, workerEntries:[{workerName:String,attendance:String,dutyArea:String,workDone:String,salary:Number,amountEarned:Number,paymentGiven:Number,pending:Number,remarks:String,workCategory:String,workArea:Number,unit:String,rate:Number,loadingCharge:Number,unloadingCharge:Number,paymentMode:String}], payments:Array, totalPayments:Number, totalReceived:Number, complaints:String, actionTaken:String, complaintRemarks:String, addedBy:String, newSite:String, runningSite:String, workersDetail:String, materialSupply:String, dayNote:String, expenses:String, workerPayments:[{workerName:String,amount:Number,date:String,note:String}] }, {timestamps:true});
 const WorkPlanSchema = new mongoose.Schema({ date:String, siteName:String, task:String, workers:String, materials:String, note:String, status:{type:String,default:'planned'}, fromDate:String, toDate:String, site:String, plannedWork:String, supervisor:String, workersAllocated:String, materialsNeeded:String, estimatedCost:Number, paymentPlan:String, notes:String, archived:{type:Boolean,default:false}, addedBy:String }, {timestamps:true});
 const WorkerSchema = new mongoose.Schema({ name:String, phone:String, address:String, role:String, workerType:String, workerCategory:String, status:{type:String,default:'Active'}, workLocationType:String, paymentType:String, customPaymentType:String, rateType:String, rateAmount:Number, totalProduction:{type:Number,default:0}, totalEarnings:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
 const WorkerPaymentSchema = new mongoose.Schema({ workerName:String, amount:Number, date:String, mode:String, note:String, addedBy:String, source:String, reportDate:String }, {timestamps:true});
 const PurchaseSchema = new mongoose.Schema({ date:String, supplierName:String, supplierPhone:String, supplierMobile:String, supplierAddress:String, itemName:String, itemType:String, quantity:String, unit:String, unitPrice:String, totalAmount:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, vehicleNumber:String, vehicleType:String, driverName:String, driverPhone:String, deliveryAddress:String, note:String, addedBy:String, source:String, sourceId:String }, {timestamps:true});
 const CompanyPurchaseSchema = new mongoose.Schema({ date:String, materialName:String, quantity:Number, unit:String, amount:Number, paymentMode:String, accountName:String, note:String, purchasedBy:String, purchasedByRole:String }, {timestamps:true});
+const SupervisorCashReceiptSchema = new mongoose.Schema({ date:String, supervisorName:String, amount:Number, paymentMode:String, receivedBy:String, receivedByRole:String, note:String }, {timestamps:true});
 const SupplierSchema = new mongoose.Schema({ name:String, mobile:String, phone:String, address:String, location:String, materialType:String, materials:[String], customMaterial:String, gstNumber:String, notes:String, note:String, totalPurchases:{type:Number,default:0}, totalPurchaseAmount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
 const MasterDataSchema = new mongoose.Schema({ name:String, category:String, shape:String, color:String, size:String, thickness:String, sqftPerPiece:Number, boxCount:Number, pricePerSqft:Number, pricePerSqm:Number, unit:String, price:Number, stock:Number, rate:Number, rateType:String, description:String, notes:String, addedBy:String }, {timestamps:true});
 const DriverReportSchema = new mongoose.Schema({
@@ -60,7 +61,7 @@ const ProductionSiteSchema = new mongoose.Schema({
   itemId:String, itemName:String, category:String, shape:String, color:String, size:String, thickness:String, unitType:String,
   productType:String, productionUnit:String, boxQty:Number, boxCount:Number,
   producedQty:Number, sqftPerPiece:Number, sqftQty:Number, unit:String, productionRate:Number, totalAmount:Number,
-  paymentGiven:Number, amountPending:Number, remarks:String,
+  loadingCharge:Number, unloadingCharge:Number, paymentGiven:Number, amountPending:Number, remarks:String,
   workType:String, notes:String, attendance:Array, totalCost:Number, addedBy:String,
   dedupeKey:String,
 }, {timestamps:true});
@@ -626,6 +627,7 @@ const Worker = mongoose.model('Worker', WorkerSchema);
 const WorkerPayment = mongoose.model('WorkerPayment', WorkerPaymentSchema);
 const Purchase = mongoose.model('Purchase', PurchaseSchema);
 const CompanyPurchase = mongoose.model('CompanyPurchase', CompanyPurchaseSchema);
+const SupervisorCashReceipt = mongoose.model('SupervisorCashReceipt', SupervisorCashReceiptSchema);
 const Supplier = mongoose.model('Supplier', SupplierSchema);
 const DriverReport = mongoose.model('DriverReport', DriverReportSchema);
 const ReportAudit = mongoose.model('ReportAudit', ReportAuditSchema);
@@ -1126,9 +1128,11 @@ function normKey(v) {
 function normalizeWorkerEntry(we = {}) {
   const workArea = +(we.workArea || 0) || 0;
   const rate = +(we.rate || 0) || 0;
-  const calculatedAmount = workArea * rate;
+  const loadingCharge = +(we.loadingCharge || 0) || 0;
+  const unloadingCharge = +(we.unloadingCharge || 0) || 0;
+  const calculatedAmount = (workArea * rate) + loadingCharge + unloadingCharge;
   const rawEarned = we.amountEarned ?? we.salary ?? calculatedAmount;
-  const amountEarned = +(rawEarned || 0) || calculatedAmount;
+  const amountEarned = Math.max(+(rawEarned || 0) || 0, calculatedAmount);
   const rawPayment = we.paymentGiven ?? we.paidAmount ?? we.amountPaid ?? we.payment ?? 0;
   const paymentGiven = +(rawPayment || 0) || 0;
   const pending = Math.max(0, amountEarned - paymentGiven);
@@ -1136,6 +1140,8 @@ function normalizeWorkerEntry(we = {}) {
     ...we,
     workArea,
     rate,
+    loadingCharge,
+    unloadingCharge,
     salary: amountEarned,
     amountEarned,
     paymentGiven,
@@ -1413,6 +1419,8 @@ function productionDedupeKey(data = {}) {
     data.unit || data.unitType,
     +(data.producedQty) || 0,
     +(data.productionRate) || 0,
+    +(data.loadingCharge) || 0,
+    +(data.unloadingCharge) || 0,
     +(data.paymentGiven) || 0,
   ].map(normalizeDedupePart).join('|');
 }
@@ -1426,6 +1434,8 @@ function productionDuplicateFilter(data = {}) {
     producedQty: +(data.producedQty) || 0,
     unit: data.unit || data.unitType || '',
     productionRate: +(data.productionRate) || 0,
+    loadingCharge: +(data.loadingCharge) || 0,
+    unloadingCharge: +(data.unloadingCharge) || 0,
     paymentGiven: +(data.paymentGiven) || 0,
     addedBy: data.addedBy || '',
   };
@@ -1982,6 +1992,38 @@ app.post('/api/company-purchases', async(req,res)=>{
   } catch(e) { res.status(400).json({ message: e.message }); }
 });
 
+app.get('/api/supervisor-cash-receipts', async(req,res)=>{
+  try {
+    const { supervisorName, date, fromDate, toDate } = req.query;
+    const filter = {};
+    if (supervisorName) filter.supervisorName = supervisorName;
+    if (date) filter.date = date;
+    if (fromDate || toDate) {
+      filter.date = {};
+      if (fromDate) filter.date.$gte = fromDate;
+      if (toDate) filter.date.$lte = toDate;
+    }
+    res.json(await SupervisorCashReceipt.find(filter).sort({ date: -1, createdAt: -1 }).lean());
+  } catch(e) { res.status(500).json({ message: e.message }); }
+});
+
+app.post('/api/supervisor-cash-receipts', async(req,res)=>{
+  try {
+    const amount = +(req.body.amount) || 0;
+    if (!req.body.supervisorName || amount <= 0) return res.status(400).json({ message: 'Supervisor and amount required' });
+    const receipt = await SupervisorCashReceipt.create({
+      date: req.body.date || new Date().toISOString().slice(0, 10),
+      supervisorName: req.body.supervisorName,
+      amount,
+      paymentMode: req.body.paymentMode || 'Cash',
+      receivedBy: req.body.receivedBy || req.body.addedBy || '',
+      receivedByRole: req.body.receivedByRole || req.body.role || '',
+      note: req.body.note || '',
+    });
+    res.json(receipt);
+  } catch(e) { res.status(400).json({ message: e.message }); }
+});
+
 app.get('/api/company-expenses', async(req,res)=>{
   try {
     const { tab = 'salary', date, fromDate, toDate } = req.query;
@@ -2248,11 +2290,13 @@ app.post("/api/productionsite", async(req,res)=>{
       if (!producedQty) return res.status(400).json({ message: 'Produced quantity is required' });
       if (productType === 'hollowbrick' && productionUnit === 'box' && !boxCount) return res.status(400).json({ message: 'Set 1 box count in Hollow Brick master first' });
       if (!productionRate) return res.status(400).json({ message: 'Rate per box/unit must be entered manually' });
-      const totalAmount = (productType === 'hollowbrick' && productionUnit === 'box' ? boxQty : producedQty) * productionRate;
+      const loadingCharge = +(body.loadingCharge) || 0;
+      const unloadingCharge = +(body.unloadingCharge) || 0;
+      const totalAmount = ((productType === 'hollowbrick' && productionUnit === 'box' ? boxQty : producedQty) * productionRate) + loadingCharge + unloadingCharge;
       const paymentGiven = +(body.paymentGiven) || 0;
       const amountPending = Math.max(0, totalAmount - paymentGiven);
       const entryData = {
-        ...body, productType, productionUnit, boxQty, boxCount, producedQty, sqftPerPiece, sqftQty, productionRate, totalAmount, paymentGiven, amountPending,
+        ...body, productType, productionUnit, boxQty, boxCount, producedQty, sqftPerPiece, sqftQty, productionRate, loadingCharge, unloadingCharge, totalAmount, paymentGiven, amountPending,
       };
       entryData.dedupeKey = productionDedupeKey(entryData);
       const duplicate = await ProductionSiteEntry.findOne({
@@ -2350,11 +2394,12 @@ app.get('/api/office-daily-report', async(req,res)=>{
     if (accessRole !== 'admin') return res.status(403).json({ message: 'Office daily report is available only to Admin and User' });
 
     await cleanupDuplicateProductionEntries();
-    const [sales, purchases, productionEntries, driverReports] = await Promise.all([
+    const [sales, purchases, productionEntries, driverReports, supervisorCashReceipts] = await Promise.all([
       Sales.find({ date }).sort({ createdAt: -1 }).lean(),
       Purchase.find({ date }).sort({ createdAt: -1 }).lean(),
       ProductionSiteEntry.find({ date, producedQty: { $exists: true, $gt: 0 } }).sort({ createdAt: -1 }).lean(),
       DriverReport.find({ date }).sort({ createdAt: -1 }).lean(),
+      SupervisorCashReceipt.find({ date }).sort({ createdAt: -1 }).lean(),
     ]);
 
     const productionItemMap = {};
@@ -2393,8 +2438,9 @@ app.get('/api/office-daily-report', async(req,res)=>{
       driverExpenseTotal: driverReports.reduce((sum, report) => sum + (Array.isArray(report.expenses) ? report.expenses : []).reduce((inner, e) => inner + (+(e.amount) || 0), 0), 0),
       driverFuelLiters: driverReports.reduce((sum, report) => sum + (Array.isArray(report.expenses) ? report.expenses : []).reduce((inner, e) => inner + (+(e.liters) || 0), 0), 0),
       driverKmRun: driverReports.reduce((sum, report) => sum + (+(report.vehicleKm?.totalKm) || 0), 0),
+      supervisorCashReceived: supervisorCashReceipts.reduce((sum, receipt) => sum + (+(receipt.amount) || 0), 0),
     };
-    totals.cashReceived = totals.salesReceived;
+    totals.cashReceived = totals.salesReceived + totals.supervisorCashReceived;
     totals.cashPaid = totals.purchasePaid + totals.productionPayments + totals.driverExpenseTotal;
     totals.netCash = totals.cashReceived - totals.cashPaid;
 
@@ -2403,6 +2449,7 @@ app.get('/api/office-daily-report', async(req,res)=>{
       totals,
       sales,
       purchases,
+      supervisorCashReceipts,
       driverReports,
       driverExpenses: driverReports.flatMap(report => (Array.isArray(report.expenses) ? report.expenses : []).map(expense => ({
         reportId: report._id,
@@ -2580,7 +2627,7 @@ function cashFlowRow(map, date, person, personRole) {
       date, person, personRole,
       received: 0, salesAmount: 0, customerPayments: 0,
       workerPayments: 0, vehicleCharges: 0, materialPayments: 0,
-      equipmentPayments: 0, purchasePayments: 0, otherExpenses: 0,
+      equipmentPayments: 0, purchasePayments: 0, otherExpenses: 0, cashHandovers: 0,
       totalExpenses: 0, netBalance: 0,
       receivedDetails: [], spentDetails: [], salesDetails: [], purchaseDetails: [],
     };
@@ -2620,6 +2667,9 @@ app.get('/api/cashflow', async(req,res)=>{
       if (date) reportFilter.date = date;
       const reports = await DailyReport.find(reportFilter).lean();
       const sites = await SiteWork.find(siteFilter).lean();
+      const receiptFilter = accessRole === 'admin' ? { supervisorName: { $in: supervisorNames } } : { supervisorName: name };
+      if (date) receiptFilter.date = date;
+      const supervisorCashReceipts = await SupervisorCashReceipt.find(receiptFilter).lean();
       for (const site of sites) {
         const owner = site.addedBy || 'Unknown';
         (site.payments || []).forEach(payment => {
@@ -2660,6 +2710,13 @@ app.get('/api/cashflow', async(req,res)=>{
           else if (kind === 'other expense') { row.otherExpenses += amount; row.spentDetails.push({ date: report.date, type: 'Other Expense', details: payment.expenseName || payment.remarks || 'Other Expense', amount }); }
         });
       });
+      supervisorCashReceipts.forEach(receipt => {
+        const owner = receipt.supervisorName || 'Unknown';
+        const row = cashFlowRow(rows, receipt.date || '', owner, 'supervisor');
+        const amount = +(receipt.amount) || 0;
+        row.cashHandovers += amount;
+        row.spentDetails.push({ date: receipt.date, type: 'Cash Given To Office', details: `Received by ${receipt.receivedBy || 'Office'}${receipt.note ? ` - ${receipt.note}` : ''}`, amount });
+      });
     }
 
     if (accessRole === 'admin' ? officeNames.length > 0 : accessRole === 'user') {
@@ -2674,11 +2731,14 @@ app.get('/api/cashflow', async(req,res)=>{
         productionFilter.date = date;
         expenseFilter.date = date;
       }
-      const [sales, purchases, productionEntries, expenseReports] = await Promise.all([
+      const receiptFilter = { receivedBy: accessRole === 'admin' ? { $in: officeNames } : name };
+      if (date) receiptFilter.date = date;
+      const [sales, purchases, productionEntries, expenseReports, supervisorCashReceipts] = await Promise.all([
         Sales.find(salesFilter).lean(),
         Purchase.find(purchaseFilter).lean(),
         ProductionSiteEntry.find(productionFilter).lean(),
         DailyReport.find(expenseFilter).lean(),
+        SupervisorCashReceipt.find(receiptFilter).lean(),
       ]);
       sales.forEach(sale => {
         const owner = sale.addedBy || 'Unknown';
@@ -2713,10 +2773,17 @@ app.get('/api/cashflow', async(req,res)=>{
           row.spentDetails.push({ date: report.date, type: 'Other Expense', details: payment.remarks || payment.paidTo || 'Other Expense', amount });
         });
       });
+      supervisorCashReceipts.forEach(receipt => {
+        const owner = receipt.receivedBy || 'Unknown';
+        const row = cashFlowRow(rows, receipt.date || '', owner, 'user');
+        const amount = +(receipt.amount) || 0;
+        row.received += amount;
+        row.receivedDetails.push({ date: receipt.date, site: receipt.supervisorName, source: 'Cash Received From Supervisor', amount, paymentMode: receipt.paymentMode || '', fromName: receipt.supervisorName, note: receipt.note || '' });
+      });
     }
 
     const history = Object.values(rows).map(row => {
-      const supervisorExpenses = row.workerPayments + row.vehicleCharges + row.materialPayments + row.equipmentPayments + row.otherExpenses;
+      const supervisorExpenses = row.workerPayments + row.vehicleCharges + row.materialPayments + row.equipmentPayments + row.otherExpenses + row.cashHandovers;
       const userExpenses = row.purchasePayments + row.workerPayments + row.otherExpenses;
       row.totalExpenses = row.personRole === 'supervisor' ? supervisorExpenses : userExpenses;
       row.netBalance = row.received - row.totalExpenses;
@@ -2730,6 +2797,7 @@ app.get('/api/cashflow', async(req,res)=>{
       received: 0, salesAmount: 0, customerPayments: 0,
       workerPayments: 0, vehicleCharges: 0, materialPayments: 0,
       equipmentPayments: 0, purchasePayments: 0, otherExpenses: 0,
+      cashHandovers: 0,
       totalExpenses: 0, netBalance: 0,
     });
 
@@ -2755,6 +2823,7 @@ const exportSources = () => ({
   workers: Worker,
   workerPayments: WorkerPayment,
   purchases: Purchase,
+  supervisorCashReceipts: SupervisorCashReceipt,
   suppliers: Supplier,
   driverReports: DriverReport,
   masterInterlocks: MasterInterlock,
