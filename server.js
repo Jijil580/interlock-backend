@@ -97,6 +97,8 @@ function auditTitle(type, doc = {}) {
   if (type === 'Driver Report') return `${doc.driverName || 'Driver'} - ${doc.date || ''}`;
   if (type === 'Sale') return `${doc.invoiceNumber || doc.customer || 'Sale'} - ${doc.date || ''}`;
   if (type === 'Purchase') return `${doc.supplierName || 'Purchase'} - ${doc.date || ''}`;
+  if (type === 'Production Site') return `${doc.workerName || 'Worker'} - ${doc.itemName || 'Production'} - ${doc.date || ''}`;
+  if (type === 'Admin Cash Flow') return `${doc.officeName || 'Office'} / ${doc.adminName || 'Admin'} - ${doc.date || ''}`;
   return doc.name || doc.title || type;
 }
 
@@ -2066,6 +2068,43 @@ app.post('/api/admin-cash-transfers', async(req,res)=>{
   } catch(e) { res.status(400).json({ message: e.message }); }
 });
 
+app.put('/api/admin-cash-transfers/:id', async(req,res)=>{
+  try {
+    if (!auditReasonOf(req)) return res.status(400).json({ message: 'Reason is required' });
+    const before = await AdminCashTransfer.findById(req.params.id);
+    if (!before) return res.status(404).json({ message: 'Admin cash flow record not found' });
+    const amount = +(req.body.amount) || 0;
+    const direction = req.body.direction === 'admin_to_office' ? 'admin_to_office' : 'office_to_admin';
+    if (!req.body.adminName || !req.body.officeName || amount <= 0) {
+      return res.status(400).json({ message: 'Admin, office user and amount required' });
+    }
+    const after = await AdminCashTransfer.findByIdAndUpdate(req.params.id, {
+      date: req.body.date || before.date,
+      direction,
+      adminName: req.body.adminName,
+      officeName: req.body.officeName,
+      amount,
+      paymentMode: req.body.paymentMode || 'Cash',
+      note: req.body.note || '',
+      addedBy: before.addedBy || req.body.addedBy || '',
+      addedByRole: before.addedByRole || req.body.addedByRole || req.body.role || '',
+    }, { new:true });
+    await createReportAudit({ req, recordType:'Admin Cash Flow', action:'edit', before, after });
+    res.json(after);
+  } catch(e) { res.status(e.statusCode || 400).json({ message: e.message }); }
+});
+
+app.delete('/api/admin-cash-transfers/:id', async(req,res)=>{
+  try {
+    if (!auditReasonOf(req)) return res.status(400).json({ message: 'Reason is required' });
+    const before = await AdminCashTransfer.findById(req.params.id);
+    if (!before) return res.status(404).json({ message: 'Admin cash flow record not found' });
+    await createReportAudit({ req, recordType:'Admin Cash Flow', action:'delete', before });
+    await AdminCashTransfer.findByIdAndDelete(req.params.id);
+    res.json({ ok:true });
+  } catch(e) { res.status(e.statusCode || 400).json({ message: e.message }); }
+});
+
 app.get('/api/company-expenses', async(req,res)=>{
   try {
     const { tab = 'salary', date, fromDate, toDate } = req.query;
@@ -2311,36 +2350,67 @@ app.get("/api/productionsite", async(req,res)=>{
   } catch(e) { res.status(500).json({ message: e.message }); }
 });
 
+async function buildProductionEntryData(body = {}) {
+  const worker = await Worker.findOne({ name: body.workerName }).lean();
+  if (!worker || normalizeWorkerType(worker) !== 'Production Worker' || !isWorkerActive(worker)) {
+    const error = new Error('Select an active production worker');
+    error.statusCode = 400;
+    throw error;
+  }
+  const productType = body.productType === 'hollowbrick' ? 'hollowbrick' : 'interlock';
+  const MasterModel = productType === 'hollowbrick' ? MasterHollowBrick : MasterInterlock;
+  const master = body.itemId ? await MasterModel.findById(body.itemId).lean().catch(()=>null) : null;
+  const productionUnit = body.productionUnit === 'box' ? 'box' : 'unit';
+  const boxCount = +(master?.boxCount ?? body.boxCount ?? 0) || 0;
+  const boxQty = +(body.boxQty) || 0;
+  const producedQty = productType === 'hollowbrick' && productionUnit === 'box' ? boxQty * boxCount : (+(body.producedQty) || 0);
+  const sqftPerPiece = productType === 'hollowbrick' ? 0 : (+(body.sqftPerPiece ?? master?.sqftPerPiece ?? 0) || 0);
+  const sqftQty = +(body.sqftQty ?? (producedQty * sqftPerPiece)) || 0;
+  const productionRate = +(body.productionRate) || 0;
+  if (!producedQty) {
+    const error = new Error('Produced quantity is required');
+    error.statusCode = 400;
+    throw error;
+  }
+  if (productType === 'hollowbrick' && productionUnit === 'box' && !boxCount) {
+    const error = new Error('Set 1 box count in Hollow Brick master first');
+    error.statusCode = 400;
+    throw error;
+  }
+  if (!productionRate) {
+    const error = new Error('Rate per box/unit must be entered manually');
+    error.statusCode = 400;
+    throw error;
+  }
+  const loadingCharge = +(body.loadingCharge) || 0;
+  const unloadingCharge = +(body.unloadingCharge) || 0;
+  const totalAmount = ((productType === 'hollowbrick' && productionUnit === 'box' ? boxQty : producedQty) * productionRate) + loadingCharge + unloadingCharge;
+  const paymentGiven = +(body.paymentGiven) || 0;
+  const amountPending = Math.max(0, totalAmount - paymentGiven);
+  const entryData = {
+    ...body, productType, productionUnit, boxQty, boxCount, producedQty, sqftPerPiece, sqftQty,
+    productionRate, loadingCharge, unloadingCharge, totalAmount, paymentGiven, amountPending,
+  };
+  entryData.dedupeKey = productionDedupeKey(entryData);
+  return entryData;
+}
+
+async function deleteProductionWorkerPayment(entry = {}) {
+  if ((+(entry.paymentGiven) || 0) <= 0) return;
+  await WorkerPayment.findOneAndDelete({
+    workerName: entry.workerName,
+    amount: +(entry.paymentGiven) || 0,
+    date: entry.date,
+    source: 'production',
+    note: `Production: ${entry.itemName}`,
+  }).sort({ createdAt: -1 });
+}
+
 app.post("/api/productionsite", async(req,res)=>{
   try {
     const body = req.body;
     if (body.workerName && body.itemName && body.producedQty != null) {
-      const worker = await Worker.findOne({ name: body.workerName }).lean();
-      if (!worker || normalizeWorkerType(worker) !== 'Production Worker' || !isWorkerActive(worker)) {
-        return res.status(400).json({ message: 'Select an active production worker' });
-      }
-      const productType = body.productType === 'hollowbrick' ? 'hollowbrick' : 'interlock';
-      const MasterModel = productType === 'hollowbrick' ? MasterHollowBrick : MasterInterlock;
-      const master = body.itemId ? await MasterModel.findById(body.itemId).lean().catch(()=>null) : null;
-      const productionUnit = body.productionUnit === 'box' ? 'box' : 'unit';
-      const boxCount = +(master?.boxCount ?? 0) || 0;
-      const boxQty = +(body.boxQty) || 0;
-      const producedQty = productType === 'hollowbrick' && productionUnit === 'box' ? boxQty * boxCount : (+(body.producedQty) || 0);
-      const sqftPerPiece = productType === 'hollowbrick' ? 0 : (+(body.sqftPerPiece ?? master?.sqftPerPiece ?? 0) || 0);
-      const sqftQty = +(body.sqftQty ?? (producedQty * sqftPerPiece)) || 0;
-      const productionRate = +(body.productionRate) || 0;
-      if (!producedQty) return res.status(400).json({ message: 'Produced quantity is required' });
-      if (productType === 'hollowbrick' && productionUnit === 'box' && !boxCount) return res.status(400).json({ message: 'Set 1 box count in Hollow Brick master first' });
-      if (!productionRate) return res.status(400).json({ message: 'Rate per box/unit must be entered manually' });
-      const loadingCharge = +(body.loadingCharge) || 0;
-      const unloadingCharge = +(body.unloadingCharge) || 0;
-      const totalAmount = ((productType === 'hollowbrick' && productionUnit === 'box' ? boxQty : producedQty) * productionRate) + loadingCharge + unloadingCharge;
-      const paymentGiven = +(body.paymentGiven) || 0;
-      const amountPending = Math.max(0, totalAmount - paymentGiven);
-      const entryData = {
-        ...body, productType, productionUnit, boxQty, boxCount, producedQty, sqftPerPiece, sqftQty, productionRate, loadingCharge, unloadingCharge, totalAmount, paymentGiven, amountPending,
-      };
-      entryData.dedupeKey = productionDedupeKey(entryData);
+      const entryData = await buildProductionEntryData(body);
       const duplicate = await ProductionSiteEntry.findOne({
         $or: [{ dedupeKey: entryData.dedupeKey }, productionDuplicateFilter(entryData)]
       }).sort({ createdAt: 1 }).lean();
@@ -2357,10 +2427,10 @@ app.post("/api/productionsite", async(req,res)=>{
         }
         throw err;
       }
-      await updateStockFromProduction({ ...body, productType, producedQty, sqftPerPiece, sqftQty, unit: 'piece', unitType: 'piece' });
+      await updateStockFromProduction({ ...entryData, unit: 'piece', unitType: 'piece' });
       await syncWorkerTotals(body.workerName);
-      if (paymentGiven > 0) {
-        await recordWorkerPayment(body.workerName, paymentGiven, body.date, 'production', body.addedBy, `Production: ${body.itemName}`);
+      if ((+(entryData.paymentGiven) || 0) > 0) {
+        await recordWorkerPayment(entryData.workerName, entryData.paymentGiven, entryData.date, 'production', entryData.addedBy, `Production: ${entryData.itemName}`);
       }
       return res.json(entry);
     }
@@ -2368,7 +2438,53 @@ app.post("/api/productionsite", async(req,res)=>{
   } catch(e) { res.status(400).json({ message: e.message }); }
 });
 
-app.put("/api/productionsite/:id", async(req,res)=>res.json(await ProductionSiteEntry.findByIdAndUpdate(req.params.id,req.body,{new:true})));
+app.put("/api/productionsite/:id", async(req,res)=>{
+  try {
+    if (!auditReasonOf(req)) return res.status(400).json({ message: 'Reason is required' });
+    const before = await ProductionSiteEntry.findById(req.params.id);
+    if (!before) return res.status(404).json({ message: 'Production entry not found' });
+    const body = { ...before.toObject(), ...req.body };
+    const entryData = body.workerName && body.itemName && body.producedQty != null ? await buildProductionEntryData(body) : body;
+    if (entryData.dedupeKey) {
+      const duplicate = await ProductionSiteEntry.findOne({
+        _id: { $ne: req.params.id },
+        $or: [{ dedupeKey: entryData.dedupeKey }, productionDuplicateFilter(entryData)]
+      }).lean();
+      if (duplicate) return res.status(400).json({ message: 'Duplicate production entry already exists.' });
+    }
+    if ((+(before.producedQty) || 0) > 0) {
+      await updateStockFromProduction({ ...before.toObject(), producedQty: -(+(before.producedQty) || 0) });
+    }
+    await deleteProductionWorkerPayment(before);
+    const after = await ProductionSiteEntry.findByIdAndUpdate(req.params.id, entryData, { new:true });
+    if ((+(after.producedQty) || 0) > 0) {
+      await updateStockFromProduction({ ...after.toObject(), unit: 'piece', unitType: 'piece' });
+    }
+    if ((+(after.paymentGiven) || 0) > 0) {
+      await recordWorkerPayment(after.workerName, after.paymentGiven, after.date, 'production', after.addedBy, `Production: ${after.itemName}`);
+    }
+    await syncWorkerTotals(before.workerName);
+    if (before.workerName !== after.workerName) await syncWorkerTotals(after.workerName);
+    await createReportAudit({ req, recordType:'Production Site', action:'edit', before, after });
+    res.json(after);
+  } catch(e) { res.status(e.statusCode || 400).json({ message: e.message }); }
+});
+
+app.delete("/api/productionsite/:id", async(req,res)=>{
+  try {
+    if (!auditReasonOf(req)) return res.status(400).json({ message: 'Reason is required' });
+    const before = await ProductionSiteEntry.findById(req.params.id);
+    if (!before) return res.status(404).json({ message: 'Production entry not found' });
+    if ((+(before.producedQty) || 0) > 0) {
+      await updateStockFromProduction({ ...before.toObject(), producedQty: -(+(before.producedQty) || 0) });
+    }
+    await deleteProductionWorkerPayment(before);
+    await createReportAudit({ req, recordType:'Production Site', action:'delete', before });
+    await ProductionSiteEntry.findByIdAndDelete(req.params.id);
+    await syncWorkerTotals(before.workerName);
+    res.json({ ok:true });
+  } catch(e) { res.status(e.statusCode || 400).json({ message: e.message }); }
+});
 
 app.get('/api/productionsite/reports', async(req,res)=>{
   try {
