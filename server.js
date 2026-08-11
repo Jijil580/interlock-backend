@@ -57,6 +57,15 @@ const ReportAuditSchema = new mongoose.Schema({
   performedBy:String, performedRole:String, recordDate:String, title:String,
   before:Object, after:Object,
 }, {timestamps:true});
+const SalaryRecordSchema = new mongoose.Schema({
+  employeeId:String, employeeName:String, role:String, month:String,
+  monthlySalary:Number, incentive:Number, absentDays:Number, presentDays:Number,
+  calculatedSalary:Number, manualSalary:Number, payableAmount:Number,
+  paidAmount:{type:Number,default:0}, pendingAmount:Number, status:{type:String,default:'pending'},
+  payments:[{amount:Number,date:String,mode:String,note:String,paidBy:String}],
+  addedBy:String, updatedBy:String,
+}, {timestamps:true});
+SalaryRecordSchema.index({ employeeId:1, month:1 }, { unique:true });
 const ProductionSiteSchema = new mongoose.Schema({
   date:String, shift:String, workerId:String, workerName:String,
   itemId:String, itemName:String, category:String, shape:String, color:String, size:String, thickness:String, unitType:String,
@@ -635,6 +644,7 @@ const AdminCashTransfer = mongoose.model('AdminCashTransfer', AdminCashTransferS
 const Supplier = mongoose.model('Supplier', SupplierSchema);
 const DriverReport = mongoose.model('DriverReport', DriverReportSchema);
 const ReportAudit = mongoose.model('ReportAudit', ReportAuditSchema);
+const SalaryRecord = mongoose.model('SalaryRecord', SalaryRecordSchema);
 const MasterInterlock = mongoose.model('MasterInterlock', MasterDataSchema);
 const MasterHollowBrick = mongoose.model('MasterHollowBrick', MasterDataSchema);
 const MasterMaterial = mongoose.model('MasterMaterial', new mongoose.Schema({...MasterDataSchema.obj},{timestamps:true}));
@@ -684,6 +694,60 @@ async function seedData() {
 app.get('/api/users', async(req,res)=>res.json(await User.find({},'-password')));
 app.post('/api/users', async(req,res)=>{ try{ const {name,username,password,role,company,mobile,vehicleName,vehicleNumber}=req.body; const avatar=name.split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase(); res.json(await User.create({name,username,password,role,avatar,mobile:normalizeMobile(mobile),vehicleName,vehicleNumber,company:company||'default'})); }catch(e){res.status(400).json({message:e.message});} });
 app.put('/api/users/:id', async(req,res)=>res.json(await User.findByIdAndUpdate(req.params.id,req.body,{new:true})));
+
+function salaryValues(data = {}, existing = {}) {
+  const monthlySalary = Math.max(0, +(data.monthlySalary ?? existing.monthlySalary) || 0);
+  const incentive = Math.max(0, +(data.incentive ?? existing.incentive) || 0);
+  const absentDays = Math.min(30, Math.max(0, +(data.absentDays ?? existing.absentDays) || 0));
+  const presentDays = 30 - absentDays;
+  const calculatedSalary = +(((monthlySalary / 30) * presentDays) + incentive).toFixed(2);
+  const manualInput = data.manualSalary ?? existing.manualSalary;
+  const manualSalary = manualInput === '' || manualInput === null || manualInput === undefined ? 0 : Math.max(0, +manualInput || 0);
+  const payableAmount = manualSalary > 0 ? manualSalary : calculatedSalary;
+  const paidAmount = Math.max(0, +(existing.paidAmount) || 0);
+  const pendingAmount = Math.max(0, +(payableAmount - paidAmount).toFixed(2));
+  return { monthlySalary, incentive, absentDays, presentDays, calculatedSalary, manualSalary, payableAmount, paidAmount, pendingAmount, status:pendingAmount <= 0 ? 'paid' : paidAmount > 0 ? 'partially-paid' : 'pending' };
+}
+
+app.get('/api/salary-records', async(req,res)=>{
+  try {
+    const filter = {};
+    if (req.query.role) filter.role = req.query.role;
+    if (req.query.employeeId) filter.employeeId = req.query.employeeId;
+    if (req.query.month) filter.month = req.query.month;
+    res.json(await SalaryRecord.find(filter).sort({ month:-1, employeeName:1 }).lean());
+  } catch(e) { res.status(500).json({ message:e.message }); }
+});
+app.post('/api/salary-records', async(req,res)=>{
+  try {
+    const { employeeId, month } = req.body;
+    if (!employeeId || !month) return res.status(400).json({ message:'Employee and month are required' });
+    const employee = await User.findById(employeeId).lean();
+    if (!employee || !['supervisor','user'].includes(employee.role)) return res.status(400).json({ message:'Valid supervisor or user required' });
+    const existing = await SalaryRecord.findOne({ employeeId:String(employeeId), month });
+    const values = salaryValues(req.body, existing || {});
+    const record = await SalaryRecord.findOneAndUpdate(
+      { employeeId:String(employeeId), month },
+      { ...values, employeeId:String(employeeId), employeeName:employee.name, role:employee.role, month, addedBy:existing?.addedBy || req.body.addedBy || '', updatedBy:req.body.updatedBy || req.body.addedBy || '', payments:existing?.payments || [] },
+      { new:true, upsert:true, runValidators:true, setDefaultsOnInsert:true }
+    );
+    res.json(record);
+  } catch(e) { res.status(400).json({ message:e.message }); }
+});
+app.post('/api/salary-records/:id/payment', async(req,res)=>{
+  try {
+    const record = await SalaryRecord.findById(req.params.id);
+    if (!record) return res.status(404).json({ message:'Salary record not found' });
+    const amount = +(req.body.amount) || 0;
+    if (amount <= 0) return res.status(400).json({ message:'Payment amount is required' });
+    record.payments = [...(record.payments || []), { amount, date:req.body.date || new Date().toISOString().slice(0,10), mode:req.body.mode || 'Cash', note:req.body.note || '', paidBy:req.body.paidBy || '' }];
+    record.paidAmount = (record.payments || []).reduce((sum,p)=>sum+(+(p.amount)||0),0);
+    record.pendingAmount = Math.max(0, +(record.payableAmount - record.paidAmount).toFixed(2));
+    record.status = record.pendingAmount <= 0 ? 'paid' : 'partially-paid';
+    await record.save();
+    res.json(record);
+  } catch(e) { res.status(400).json({ message:e.message }); }
+});
 app.post('/api/login', async(req,res)=>{
   try {
     const {username,password}=req.body;
@@ -2116,12 +2180,13 @@ app.get('/api/company-expenses', async(req,res)=>{
       return true;
     };
 
-    const [dailyReports, productionEntries, workerPayments, driverReports, companyPurchases] = await Promise.all([
+    const [dailyReports, productionEntries, workerPayments, driverReports, companyPurchases, salaryRecords] = await Promise.all([
       DailyReport.find({}).lean(),
       ProductionSiteEntry.find({}).lean(),
       WorkerPayment.find({}).lean(),
       DriverReport.find({}).lean(),
       CompanyPurchase.find({}).lean(),
+      SalaryRecord.find({}).lean(),
     ]);
 
     const salaryRows = [];
@@ -2168,6 +2233,17 @@ app.get('/api/company-expenses', async(req,res)=>{
         mode: (report.payments || []).slice(-1)[0]?.mode || 'Cash',
         paidBy: (report.payments || []).slice(-1)[0]?.addedBy || report.addedBy || '',
         details: `${report.vehicleNumber || ''} ${report.loadingFrom || ''} to ${report.unloadedLocation || ''}`,
+      });
+    });
+    salaryRecords.forEach(record => {
+      (record.payments || []).forEach(payment => {
+        if (!inRange(payment.date)) return;
+        salaryRows.push({
+          date:payment.date, personName:record.employeeName, role:record.role === 'supervisor' ? 'Supervisor' : 'Office User',
+          source:'Monthly Salary', earned:+(record.payableAmount)||0, paid:+(payment.amount)||0,
+          pending:+(record.pendingAmount)||0, mode:payment.mode || 'Cash', paidBy:payment.paidBy || '',
+          details:`${record.month} salary${record.incentive ? ` + incentive ${record.incentive}` : ''}`,
+        });
       });
     });
 
