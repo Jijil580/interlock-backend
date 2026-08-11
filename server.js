@@ -694,6 +694,14 @@ async function seedData() {
 app.get('/api/users', async(req,res)=>res.json(await User.find({},'-password')));
 app.post('/api/users', async(req,res)=>{ try{ const {name,username,password,role,company,mobile,vehicleName,vehicleNumber}=req.body; const avatar=name.split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase(); res.json(await User.create({name,username,password,role,avatar,mobile:normalizeMobile(mobile),vehicleName,vehicleNumber,company:company||'default'})); }catch(e){res.status(400).json({message:e.message});} });
 app.put('/api/users/:id', async(req,res)=>res.json(await User.findByIdAndUpdate(req.params.id,req.body,{new:true})));
+app.delete('/api/users/:id', async(req,res)=>{
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ message:'User not found' });
+    await User.findByIdAndDelete(req.params.id);
+    res.json({ ok:true, deletedId:req.params.id });
+  } catch(e) { res.status(400).json({ message:e.message }); }
+});
 
 function salaryValues(data = {}, existing = {}) {
   const monthlySalary = Math.max(0, +(data.monthlySalary ?? existing.monthlySalary) || 0);
