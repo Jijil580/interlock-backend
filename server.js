@@ -2440,9 +2440,13 @@ app.post("/api/productionsite", async(req,res)=>{
 
 app.put("/api/productionsite/:id", async(req,res)=>{
   try {
-    if (!auditReasonOf(req)) return res.status(400).json({ message: 'Reason is required' });
     const before = await ProductionSiteEntry.findById(req.params.id);
     if (!before) return res.status(404).json({ message: 'Production entry not found' });
+    const isProductionWorkEntry = (+(before.producedQty) || 0) > 0 || (req.body.workerName && req.body.itemName && req.body.producedQty != null);
+    if (!isProductionWorkEntry) {
+      return res.json(await ProductionSiteEntry.findByIdAndUpdate(req.params.id, req.body, { new:true }));
+    }
+    if (!auditReasonOf(req)) return res.status(400).json({ message: 'Reason is required' });
     const body = { ...before.toObject(), ...req.body };
     const entryData = body.workerName && body.itemName && body.producedQty != null ? await buildProductionEntryData(body) : body;
     if (entryData.dedupeKey) {
