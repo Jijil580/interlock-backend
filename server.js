@@ -1600,12 +1600,14 @@ async function buildProductionWorkerReport(workerName, filters = {}) {
     qty: p.producedQty, sqftPerPiece: p.sqftPerPiece, sqftQty: +(p.sqftQty || 0) || ((+(p.producedQty) || 0) * (+(p.sqftPerPiece) || 0)), unit: p.unit || p.unitType || '',
     rate: p.productionRate, amount: p.totalAmount, paid: +(p.paymentGiven) || 0,
     pending: Math.max(0, (+(p.totalAmount) || 0) - (+(p.paymentGiven) || 0)),
+    paymentMode: 'Cash', paymentGivenBy: p.addedBy || '',
   }));
   const paymentHistory = manualPayments.map(p => ({
     _id: p._id, date: p.date, item: 'Worker Payment', color: '',
     qty: 0, sqftPerPiece: 0, sqftQty: 0, unit: '-',
     rate: 0, amount: 0, paid: +(p.amount) || 0, pending: 0,
-    isExtraPayment: true, note: p.note || '',
+    isExtraPayment: true, note: p.note || '', paymentMode: p.mode || 'Cash',
+    paymentGivenBy: p.addedBy || '', addedBy: p.addedBy || '',
   }));
 
   return {
@@ -1661,7 +1663,7 @@ async function buildSiteWorkerReport(workerName, filters = {}) {
         workArea: normalized.workArea, unit: we.unit || '', rate: normalized.rate,
         amountEarned: earned, paymentGiven: paid,
         dailyPending: normalized.pending, balance: normalized.pending, paymentMode: we.paymentMode || '',
-        remarks: we.remarks || '', attendance: we.attendance,
+        paymentGivenBy: r.addedBy || '', remarks: we.remarks || '', attendance: we.attendance,
       };
       history.push(row);
 
@@ -1722,7 +1724,9 @@ async function buildSiteWorkerReport(workerName, filters = {}) {
       dailyPending: 0,
       balance: 0,
       isExtraPayment: true,
-      paymentMode: 'Cash',
+      paymentMode: p.mode || 'Cash',
+      paymentGivenBy: p.addedBy || '',
+      addedBy: p.addedBy || '',
       remarks: p.note || '',
     });
   });
