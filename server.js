@@ -29,7 +29,7 @@ const QuotationSchema = new mongoose.Schema({
   status:{type:String,default:'draft'}, addedBy:String, company:String
 }, {timestamps:true});
 const CustomerSchema = new mongoose.Schema({ mobile:{type:String,unique:true}, name:String, address:String, gstNumber:String, notes:String, totalPurchases:{type:Number,default:0}, totalSalesAmount:{type:Number,default:0}, totalDiscount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, totalQuantity:{type:Number,default:0}, company:String, addedBy:String }, {timestamps:true});
-const SiteWorkSchema = new mongoose.Schema({ customerName:String, phone:String, siteLocation:String, location:String, interlockItemId:String, interlockType:String, interlockColor:String, selectedWorkers:[String], startDate:String, endDate:String, status:{type:String,default:'running'}, workUnit:String, workSize:String, ratePerUnit:String, baseWorkCost:String, extraWork:Array, extraMaterials:Array, materialCost:String, laborCost:String, totalCost:String, payments:Array, totalReceived:Number, pendingAmount:String, paymentStatus:{type:String,default:'pending'}, paymentMode:String, note:String, addedBy:String, workStatus:String, totalAmount:Number, paidAmount:Number, company:String }, {timestamps:true});
+const SiteWorkSchema = new mongoose.Schema({ customerName:String, phone:String, siteLocation:String, location:String, interlockItemId:String, interlockType:String, interlockColor:String, selectedWorkers:[String], startDate:String, endDate:String, status:{type:String,default:'running'}, workUnit:String, workSize:String, ratePerUnit:String, baseWorkCost:String, extraWork:Array, extraMaterials:Array, materialCost:String, laborCost:String, totalCost:String, payments:Array, legacyReceived:Number, totalReceived:Number, pendingAmount:String, paymentStatus:{type:String,default:'pending'}, paymentMode:String, note:String, addedBy:String, workStatus:String, totalAmount:Number, paidAmount:Number, company:String }, {timestamps:true});
 const WorkerReportSchema = new mongoose.Schema({ siteName:String, phoneNo:String, startingDate:String, workerName:String, totalArea:String, workingCost:String, extraWork:String, extraMaterial:String, totalWorkingArea:String, totalAmount:String, note:String, paymentMode:String, upiId:String, bankName:String, bankBranch:String, bankAccount:String, amountReceivedBy:String, materialSupply:String, materialType:String, signatures:{supervisor:Boolean,office:Boolean,admin:Boolean}, addedBy:String }, {timestamps:true});
 const DailyReportSchema = new mongoose.Schema({ date:String, siteName:String, siteId:String, siteStatus:String, workersCount:String, totalArea:String, completedToday:String, totalCompleted:String, interlockType:String, dayNotes:String, materialsUnloaded:String, materialQty:String, equipment:String, supplierName:String, materialRemarks:String, extraWorkDesc:String, extraWorkQty:String, extraWorkCost:String, extraWorkRemarks:String, workerEntries:[{workerName:String,attendance:String,dutyArea:String,workDone:String,salary:Number,amountEarned:Number,paymentGiven:Number,pending:Number,remarks:String,workCategory:String,workArea:Number,unit:String,rate:Number,loadingCharge:Number,unloadingCharge:Number,paymentMode:String}], payments:Array, totalPayments:Number, totalReceived:Number, complaints:String, actionTaken:String, complaintRemarks:String, addedBy:String, newSite:String, runningSite:String, workersDetail:String, materialSupply:String, dayNote:String, expenses:String, workerPayments:[{workerName:String,amount:Number,date:String,note:String}] }, {timestamps:true});
 const WorkPlanSchema = new mongoose.Schema({ date:String, siteName:String, task:String, workers:String, materials:String, note:String, status:{type:String,default:'planned'}, fromDate:String, toDate:String, site:String, plannedWork:String, supervisor:String, workersAllocated:String, materialsNeeded:String, estimatedCost:Number, paymentPlan:String, notes:String, archived:{type:Boolean,default:false}, addedBy:String }, {timestamps:true});
@@ -41,7 +41,8 @@ const SupervisorCashReceiptSchema = new mongoose.Schema({ date:String, superviso
 const AdminCashTransferSchema = new mongoose.Schema({ date:String, direction:String, adminName:String, officeName:String, amount:Number, paymentMode:String, note:String, addedBy:String, addedByRole:String }, {timestamps:true});
 const CashTransactionSchema = new mongoose.Schema({
   date:String,
-  partyType:{ type:String, enum:['driver','supervisor','admin'] },
+  time:String,
+  partyType:{ type:String, enum:['driver','supervisor','admin','site'] },
   partyId:String,
   partyName:String,
   direction:{ type:String, enum:['receive','give'] },
@@ -1329,8 +1330,13 @@ app.get('/api/customers/reports', async(req,res)=>{
 
 app.get('/api/sitework', async(req,res)=>{
   const sites = await SiteWork.find().sort({createdAt:-1});
-  for (const site of sites) await recalcSiteFinancials(site);
-  res.json(sites);
+  const response = [];
+  for (const site of sites) {
+    await recalcSiteFinancials(site);
+    const cashTransactionPayments = await getCashTransactionSitePaymentRows(site);
+    response.push({ ...site.toObject(), cashTransactionPayments });
+  }
+  res.json(response);
 });
 app.post('/api/sitework', async(req,res)=>{
   const body = { ...req.body };
@@ -2489,8 +2495,9 @@ app.delete('/api/admin-cash-transfers/:id', async(req,res)=>{
 });
 
 function cashTransactionPayload(body = {}, existing = {}) {
-  const partyType = ['driver','supervisor','admin'].includes(body.partyType) ? body.partyType : existing.partyType;
-  const direction = body.direction === 'receive' ? 'receive' : body.direction === 'give' ? 'give' : existing.direction;
+  const partyType = ['driver','supervisor','admin','site'].includes(body.partyType) ? body.partyType : existing.partyType;
+  const requestedDirection = body.direction === 'receive' ? 'receive' : body.direction === 'give' ? 'give' : existing.direction;
+  const direction = partyType === 'site' ? 'receive' : requestedDirection;
   const amount = +(body.amount) || 0;
   const partyName = String(body.partyName || existing.partyName || '').trim();
   const addedBy = String(body.addedBy || existing.addedBy || '').trim();
@@ -2504,6 +2511,7 @@ function cashTransactionPayload(body = {}, existing = {}) {
   const partyRole = partyType;
   return {
     date: body.date || existing.date || new Date().toISOString().slice(0, 10),
+    time: body.time || existing.time || new Date().toTimeString().slice(0, 5),
     partyType,
     partyId: String(body.partyId || existing.partyId || ''),
     partyName,
@@ -2518,6 +2526,24 @@ function cashTransactionPayload(body = {}, existing = {}) {
     addedBy,
     addedByRole,
   };
+}
+
+async function siteForCashTransaction(transaction) {
+  if (!transaction || transaction.partyType !== 'site') return null;
+  if (transaction.partyId && mongoose.isValidObjectId(transaction.partyId)) {
+    const site = await SiteWork.findById(transaction.partyId);
+    if (site) return site;
+  }
+  return transaction.partyName ? SiteWork.findOne({ customerName:transaction.partyName }) : null;
+}
+
+async function recalcCashTransactionSites(...transactions) {
+  const sites = new Map();
+  for (const transaction of transactions) {
+    const site = await siteForCashTransaction(transaction);
+    if (site) sites.set(String(site._id), site);
+  }
+  for (const site of sites.values()) await recalcSiteFinancials(site);
 }
 
 app.get('/api/cash-transactions', async(req,res)=>{
@@ -2552,7 +2578,17 @@ app.get('/api/cash-transactions', async(req,res)=>{
 
 app.post('/api/cash-transactions', async(req,res)=>{
   try {
-    res.json(await CashTransaction.create(cashTransactionPayload(req.body)));
+    const payload = cashTransactionPayload(req.body);
+    if (payload.partyType === 'site') {
+      const site = await siteForCashTransaction(payload);
+      if (!site) return res.status(400).json({ message:'Select a valid site' });
+      await initializeSiteLegacyReceived(site);
+      payload.partyId = String(site._id);
+      payload.partyName = site.customerName;
+    }
+    const record = await CashTransaction.create(payload);
+    await recalcCashTransactionSites(record);
+    res.json(record);
   } catch(e) { res.status(e.statusCode || 400).json({ message:e.message }); }
 });
 
@@ -2561,8 +2597,17 @@ app.put('/api/cash-transactions/:id', async(req,res)=>{
     if (!auditReasonOf(req)) return res.status(400).json({ message:'Reason is required' });
     const before = await CashTransaction.findById(req.params.id);
     if (!before) return res.status(404).json({ message:'Cash transaction not found' });
-    const after = await CashTransaction.findByIdAndUpdate(req.params.id, cashTransactionPayload(req.body, before.toObject()), { new:true });
+    const payload = cashTransactionPayload(req.body, before.toObject());
+    if (payload.partyType === 'site') {
+      const site = await siteForCashTransaction(payload);
+      if (!site) return res.status(400).json({ message:'Select a valid site' });
+      await initializeSiteLegacyReceived(site);
+      payload.partyId = String(site._id);
+      payload.partyName = site.customerName;
+    }
+    const after = await CashTransaction.findByIdAndUpdate(req.params.id, payload, { new:true });
     await createReportAudit({ req, recordType:'Cash Transaction', action:'edit', before, after });
+    await recalcCashTransactionSites(before, after);
     res.json(after);
   } catch(e) { res.status(e.statusCode || 400).json({ message:e.message }); }
 });
@@ -2574,6 +2619,7 @@ app.delete('/api/cash-transactions/:id', async(req,res)=>{
     if (!before) return res.status(404).json({ message:'Cash transaction not found' });
     await createReportAudit({ req, recordType:'Cash Transaction', action:'delete', before });
     await CashTransaction.findByIdAndDelete(req.params.id);
+    await recalcCashTransactionSites(before);
     res.json({ ok:true });
   } catch(e) { res.status(e.statusCode || 400).json({ message:e.message }); }
 });
@@ -2754,18 +2800,63 @@ async function getDailySitePayments(site) {
   }, 0), 0);
 }
 
-async function getLegacySiteWorkPayment(site, dailySitePayments = null) {
+async function getCashTransactionSitePaymentRows(site) {
+  if (!site) return [];
+  const records = await CashTransaction.find({
+    partyType:'site',
+    direction:'receive',
+    $or:[
+      { partyId:String(site._id) },
+      { partyName:site.customerName, partyId:{ $in:['', null] } },
+    ],
+  }).sort({ date:-1, time:-1, createdAt:-1 }).lean();
+  return records.map(record => ({
+    transactionId:String(record._id),
+    date:record.date,
+    time:record.time || record.createdAt?.toISOString?.().slice(11,16) || '',
+    amount:+(record.amount) || 0,
+    mode:record.paymentMode || 'Cash',
+    remarks:record.note || '',
+    receivedBy:record.addedBy || '',
+    source:'Cash Transactions',
+  }));
+}
+
+async function getCashTransactionSitePayments(site) {
+  const rows = await getCashTransactionSitePaymentRows(site);
+  return rows.reduce((sum,row) => sum + (+(row.amount) || 0), 0);
+}
+
+async function initializeSiteLegacyReceived(site) {
   if (!site || (Array.isArray(site.payments) && site.payments.length > 0)) return 0;
+  if (site.legacyReceived !== undefined && site.legacyReceived !== null) return +(site.legacyReceived) || 0;
+  const [daily, cash] = await Promise.all([
+    getDailySitePayments(site),
+    getCashTransactionSitePayments(site),
+  ]);
+  site.legacyReceived = Math.max(0, (+(site.totalReceived ?? site.paidAmount ?? 0) || 0) - daily - cash);
+  await site.save();
+  return +(site.legacyReceived) || 0;
+}
+
+async function getLegacySiteWorkPayment(site, dailySitePayments = null, cashTransactionPayments = null) {
+  if (!site || (Array.isArray(site.payments) && site.payments.length > 0)) return 0;
+  if (site.legacyReceived !== undefined && site.legacyReceived !== null) return +(site.legacyReceived) || 0;
   const daily = dailySitePayments === null ? await getDailySitePayments(site) : dailySitePayments;
+  const cash = cashTransactionPayments === null ? await getCashTransactionSitePayments(site) : cashTransactionPayments;
   const storedReceived = +(site.totalReceived ?? site.paidAmount ?? 0) || 0;
-  return Math.max(0, storedReceived - daily);
+  site.legacyReceived = Math.max(0, storedReceived - daily - cash);
+  return +(site.legacyReceived) || 0;
 }
 
 async function recalcSiteFinancials(siteOrId) {
   const site = typeof siteOrId === 'string' ? await SiteWork.findById(siteOrId) : siteOrId;
   if (!site) return null;
-  const dailySitePayments = await getDailySitePayments(site);
-  const totalReceived = siteWorkPaymentsOf(site) + await getLegacySiteWorkPayment(site, dailySitePayments) + dailySitePayments;
+  const [dailySitePayments, cashTransactionPayments] = await Promise.all([
+    getDailySitePayments(site),
+    getCashTransactionSitePayments(site),
+  ]);
+  const totalReceived = siteWorkPaymentsOf(site) + await getLegacySiteWorkPayment(site, dailySitePayments, cashTransactionPayments) + dailySitePayments + cashTransactionPayments;
   const pendingAmount = Math.max(0, siteCostOf(site) - totalReceived);
   const paymentStatus = pendingAmount === 0 && siteCostOf(site) > 0 ? 'paid' : totalReceived > 0 ? 'partial' : 'pending';
   site.totalReceived = totalReceived;
