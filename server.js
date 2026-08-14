@@ -39,6 +39,24 @@ const PurchaseSchema = new mongoose.Schema({ date:String, supplierName:String, s
 const CompanyPurchaseSchema = new mongoose.Schema({ date:String, materialName:String, quantity:Number, unit:String, amount:Number, paymentMode:String, accountName:String, note:String, purchasedBy:String, purchasedByRole:String }, {timestamps:true});
 const SupervisorCashReceiptSchema = new mongoose.Schema({ date:String, supervisorName:String, amount:Number, paymentMode:String, receivedBy:String, receivedByRole:String, note:String }, {timestamps:true});
 const AdminCashTransferSchema = new mongoose.Schema({ date:String, direction:String, adminName:String, officeName:String, amount:Number, paymentMode:String, note:String, addedBy:String, addedByRole:String }, {timestamps:true});
+const CashTransactionSchema = new mongoose.Schema({
+  date:String,
+  partyType:{ type:String, enum:['driver','supervisor','admin'] },
+  partyId:String,
+  partyName:String,
+  direction:{ type:String, enum:['receive','give'] },
+  fromName:String,
+  fromRole:String,
+  toName:String,
+  toRole:String,
+  amount:Number,
+  paymentMode:String,
+  note:String,
+  addedBy:String,
+  addedByRole:String,
+}, {timestamps:true});
+CashTransactionSchema.index({ partyType:1, partyName:1, date:-1 });
+CashTransactionSchema.index({ addedBy:1, date:-1 });
 const SupplierSchema = new mongoose.Schema({ name:String, mobile:String, phone:String, address:String, location:String, materialType:String, materials:[String], customMaterial:String, gstNumber:String, notes:String, note:String, totalPurchases:{type:Number,default:0}, totalPurchaseAmount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
 const MasterDataSchema = new mongoose.Schema({ name:String, category:String, shape:String, color:String, size:String, thickness:String, sqftPerPiece:Number, boxCount:Number, pricePerSqft:Number, pricePerSqm:Number, unit:String, price:Number, stock:Number, rate:Number, rateType:String, description:String, notes:String, addedBy:String }, {timestamps:true});
 const DriverReportSchema = new mongoose.Schema({
@@ -657,6 +675,7 @@ const Purchase = mongoose.model('Purchase', PurchaseSchema);
 const CompanyPurchase = mongoose.model('CompanyPurchase', CompanyPurchaseSchema);
 const SupervisorCashReceipt = mongoose.model('SupervisorCashReceipt', SupervisorCashReceiptSchema);
 const AdminCashTransfer = mongoose.model('AdminCashTransfer', AdminCashTransferSchema);
+const CashTransaction = mongoose.model('CashTransaction', CashTransactionSchema);
 const Supplier = mongoose.model('Supplier', SupplierSchema);
 const DriverReport = mongoose.model('DriverReport', DriverReportSchema);
 const ReportAudit = mongoose.model('ReportAudit', ReportAuditSchema);
@@ -2325,6 +2344,96 @@ app.delete('/api/admin-cash-transfers/:id', async(req,res)=>{
   } catch(e) { res.status(e.statusCode || 400).json({ message: e.message }); }
 });
 
+function cashTransactionPayload(body = {}, existing = {}) {
+  const partyType = ['driver','supervisor','admin'].includes(body.partyType) ? body.partyType : existing.partyType;
+  const direction = body.direction === 'receive' ? 'receive' : body.direction === 'give' ? 'give' : existing.direction;
+  const amount = +(body.amount) || 0;
+  const partyName = String(body.partyName || existing.partyName || '').trim();
+  const addedBy = String(body.addedBy || existing.addedBy || '').trim();
+  const addedByRole = String(body.addedByRole || existing.addedByRole || 'user').trim();
+  if (!partyType || !direction || !partyName || !addedBy || amount <= 0) {
+    const error = new Error('Party, transaction type, amount and office user are required');
+    error.statusCode = 400;
+    throw error;
+  }
+  const officeRole = addedByRole === 'admin' ? 'admin' : 'user';
+  const partyRole = partyType;
+  return {
+    date: body.date || existing.date || new Date().toISOString().slice(0, 10),
+    partyType,
+    partyId: String(body.partyId || existing.partyId || ''),
+    partyName,
+    direction,
+    fromName: direction === 'receive' ? partyName : addedBy,
+    fromRole: direction === 'receive' ? partyRole : officeRole,
+    toName: direction === 'receive' ? addedBy : partyName,
+    toRole: direction === 'receive' ? officeRole : partyRole,
+    amount,
+    paymentMode: body.paymentMode || existing.paymentMode || 'Cash',
+    note: body.note ?? existing.note ?? '',
+    addedBy,
+    addedByRole,
+  };
+}
+
+app.get('/api/cash-transactions', async(req,res)=>{
+  try {
+    const { partyType, partyId, partyName, direction, addedBy, date, fromDate, toDate } = req.query;
+    const filter = {};
+    if (partyType) filter.partyType = partyType;
+    if (partyId) filter.partyId = partyId;
+    if (partyName) filter.partyName = partyName;
+    if (direction) filter.direction = direction;
+    if (addedBy) filter.addedBy = addedBy;
+    if (date) filter.date = date;
+    if (fromDate || toDate) {
+      filter.date = {};
+      if (fromDate) filter.date.$gte = fromDate;
+      if (toDate) filter.date.$lte = toDate;
+    }
+    const records = await CashTransaction.find(filter).sort({ date:-1, createdAt:-1 }).lean();
+    const received = records.filter(row => row.direction === 'receive').reduce((sum,row) => sum + (+(row.amount) || 0), 0);
+    const given = records.filter(row => row.direction === 'give').reduce((sum,row) => sum + (+(row.amount) || 0), 0);
+    res.json({
+      records,
+      summary: {
+        receivedFromParty: received,
+        givenToParty: given,
+        officeBalanceImpact: received - given,
+        partyBalance: given - received,
+      },
+    });
+  } catch(e) { res.status(500).json({ message:e.message }); }
+});
+
+app.post('/api/cash-transactions', async(req,res)=>{
+  try {
+    res.json(await CashTransaction.create(cashTransactionPayload(req.body)));
+  } catch(e) { res.status(e.statusCode || 400).json({ message:e.message }); }
+});
+
+app.put('/api/cash-transactions/:id', async(req,res)=>{
+  try {
+    if (!auditReasonOf(req)) return res.status(400).json({ message:'Reason is required' });
+    const before = await CashTransaction.findById(req.params.id);
+    if (!before) return res.status(404).json({ message:'Cash transaction not found' });
+    const after = await CashTransaction.findByIdAndUpdate(req.params.id, cashTransactionPayload(req.body, before.toObject()), { new:true });
+    await createReportAudit({ req, recordType:'Cash Transaction', action:'edit', before, after });
+    res.json(after);
+  } catch(e) { res.status(e.statusCode || 400).json({ message:e.message }); }
+});
+
+app.delete('/api/cash-transactions/:id', async(req,res)=>{
+  try {
+    if (!auditReasonOf(req)) return res.status(400).json({ message:'Reason is required' });
+    const before = await CashTransaction.findById(req.params.id);
+    if (!before) return res.status(404).json({ message:'Cash transaction not found' });
+    await createReportAudit({ req, recordType:'Cash Transaction', action:'delete', before });
+    await CashTransaction.findByIdAndDelete(req.params.id);
+    res.json({ ok:true });
+  } catch(e) { res.status(e.statusCode || 400).json({ message:e.message }); }
+});
+
 app.get('/api/company-expenses', async(req,res)=>{
   try {
     const { tab = 'salary', date, fromDate, toDate } = req.query;
@@ -3049,6 +3158,7 @@ function cashFlowRow(map, date, person, personRole) {
       workerPayments: 0, vehicleCharges: 0, materialPayments: 0,
       equipmentPayments: 0, purchasePayments: 0, otherExpenses: 0, cashHandovers: 0,
       adminCashGiven: 0, adminCashReceived: 0,
+      cashTransactionsGiven: 0, cashTransactionsReceived: 0,
       totalExpenses: 0, netBalance: 0,
       receivedDetails: [], spentDetails: [], salesDetails: [], purchaseDetails: [],
     };
@@ -3090,7 +3200,15 @@ app.get('/api/cashflow', async(req,res)=>{
       const sites = await SiteWork.find(siteFilter).lean();
       const receiptFilter = accessRole === 'admin' ? { supervisorName: { $in: supervisorNames } } : { supervisorName: name };
       if (date) receiptFilter.date = date;
-      const supervisorCashReceipts = await SupervisorCashReceipt.find(receiptFilter).lean();
+      const transactionFilter = {
+        partyType:'supervisor',
+        partyName: accessRole === 'admin' ? { $in:supervisorNames } : name,
+      };
+      if (date) transactionFilter.date = date;
+      const [supervisorCashReceipts, supervisorCashTransactions] = await Promise.all([
+        SupervisorCashReceipt.find(receiptFilter).lean(),
+        CashTransaction.find(transactionFilter).lean(),
+      ]);
       for (const site of sites) {
         const owner = site.addedBy || 'Unknown';
         (site.payments || []).forEach(payment => {
@@ -3138,6 +3256,30 @@ app.get('/api/cashflow', async(req,res)=>{
         row.cashHandovers += amount;
         row.spentDetails.push({ date: receipt.date, type: 'Cash Given To Office', details: `Received by ${receipt.receivedBy || 'Office'}${receipt.note ? ` - ${receipt.note}` : ''}`, amount });
       });
+      supervisorCashTransactions.forEach(transaction => {
+        const owner = transaction.partyName || 'Unknown';
+        const row = cashFlowRow(rows, transaction.date || '', owner, 'supervisor');
+        const amount = +(transaction.amount) || 0;
+        if (transaction.direction === 'receive') {
+          row.cashHandovers += amount;
+          row.spentDetails.push({
+            date:transaction.date,
+            type:'Cash Given To Office',
+            details:`Received by ${transaction.toName || transaction.addedBy || 'Office'}${transaction.note ? ` - ${transaction.note}` : ''}`,
+            amount,
+          });
+        } else {
+          row.received += amount;
+          row.receivedDetails.push({
+            date:transaction.date,
+            site:transaction.fromName || transaction.addedBy || 'Office',
+            source:'Cash Received From Office',
+            amount,
+            paymentMode:transaction.paymentMode || '',
+            note:transaction.note || '',
+          });
+        }
+      });
     }
 
     if (accessRole === 'admin' ? officeNames.length > 0 : accessRole === 'user') {
@@ -3166,13 +3308,16 @@ app.get('/api/cashflow', async(req,res)=>{
         ? { $or: [{ officeName: { $in: officeNames } }, { adminName: { $in: officeNames } }] }
         : { officeName: name };
       if (date) adminTransferFilter.date = date;
-      const [sales, purchases, productionEntries, expenseReports, supervisorCashReceipts, adminCashTransfers, workerSalaryPayments, driverSalaryReports, monthlySalaryRecords, salaryAdvances] = await Promise.all([
+      const cashTransactionFilter = accessRole === 'admin' ? { addedBy:{ $in:officeNames } } : { addedBy:name };
+      if (date) cashTransactionFilter.date = date;
+      const [sales, purchases, productionEntries, expenseReports, supervisorCashReceipts, adminCashTransfers, cashTransactions, workerSalaryPayments, driverSalaryReports, monthlySalaryRecords, salaryAdvances] = await Promise.all([
         Sales.find(salesFilter).lean(),
         Purchase.find(purchaseFilter).lean(),
         ProductionSiteEntry.find(productionFilter).lean(),
         DailyReport.find(expenseFilter).lean(),
         SupervisorCashReceipt.find(receiptFilter).lean(),
         AdminCashTransfer.find(adminTransferFilter).lean(),
+        CashTransaction.find(cashTransactionFilter).lean(),
         WorkerPayment.find(workerPaymentFilter).lean(),
         DriverReport.find({ 'payments.addedBy': accessRole === 'admin' ? { $in:officeNames } : name }).lean(),
         SalaryRecord.find({ 'payments.paidBy': accessRole === 'admin' ? { $in:officeNames } : name }).lean(),
@@ -3283,11 +3428,50 @@ app.get('/api/cashflow', async(req,res)=>{
           }
         }
       });
+      cashTransactions.forEach(transaction => {
+        const amount = +(transaction.amount) || 0;
+        const owner = transaction.addedBy || 'Unknown';
+        const officeRow = cashFlowRow(rows, transaction.date || '', owner, 'user');
+        const partyLabel = transaction.partyType ? `${transaction.partyType.charAt(0).toUpperCase()}${transaction.partyType.slice(1)}` : 'Party';
+        if (transaction.direction === 'receive') {
+          officeRow.received += amount;
+          officeRow.cashTransactionsReceived += amount;
+          officeRow.receivedDetails.push({
+            date:transaction.date,
+            site:transaction.partyName,
+            source:`Cash Received From ${partyLabel}`,
+            amount,
+            paymentMode:transaction.paymentMode || '',
+            fromName:transaction.partyName,
+            note:transaction.note || '',
+          });
+        } else {
+          officeRow.cashTransactionsGiven += amount;
+          officeRow.spentDetails.push({
+            date:transaction.date,
+            type:`Cash Given To ${partyLabel}`,
+            details:`${transaction.partyName || partyLabel}${transaction.note ? ` - ${transaction.note}` : ''}`,
+            amount,
+          });
+        }
+
+        if (accessRole === 'admin' && transaction.partyType === 'admin') {
+          const adminRow = cashFlowRow(rows, transaction.date || '', transaction.partyName || 'Unknown', 'admin');
+          if (transaction.direction === 'receive') {
+            adminRow.adminCashGiven += amount;
+            adminRow.spentDetails.push({ date:transaction.date, type:'Cash Given To Office', details:`${owner}${transaction.note ? ` - ${transaction.note}` : ''}`, amount });
+          } else {
+            adminRow.received += amount;
+            adminRow.adminCashReceived += amount;
+            adminRow.receivedDetails.push({ date:transaction.date, site:owner, source:'Cash Received From Office', amount, paymentMode:transaction.paymentMode || '', note:transaction.note || '' });
+          }
+        }
+      });
     }
 
     const history = Object.values(rows).map(row => {
       const supervisorExpenses = row.workerPayments + row.vehicleCharges + row.materialPayments + row.equipmentPayments + row.otherExpenses + row.cashHandovers;
-      const userExpenses = row.purchasePayments + row.workerPayments + row.otherExpenses + row.adminCashGiven;
+      const userExpenses = row.purchasePayments + row.workerPayments + row.otherExpenses + row.adminCashGiven + row.cashTransactionsGiven;
       row.totalExpenses = row.personRole === 'supervisor' ? supervisorExpenses : userExpenses;
       row.netBalance = row.received - row.totalExpenses;
       return row;
@@ -3302,6 +3486,7 @@ app.get('/api/cashflow', async(req,res)=>{
       equipmentPayments: 0, purchasePayments: 0, otherExpenses: 0,
       cashHandovers: 0,
       adminCashGiven: 0, adminCashReceived: 0,
+      cashTransactionsGiven: 0, cashTransactionsReceived: 0,
       totalExpenses: 0, netBalance: 0,
     });
 
@@ -3329,6 +3514,7 @@ const exportSources = () => ({
   purchases: Purchase,
   supervisorCashReceipts: SupervisorCashReceipt,
   adminCashTransfers: AdminCashTransfer,
+  cashTransactions: CashTransaction,
   suppliers: Supplier,
   driverReports: DriverReport,
   salaryRecords: SalaryRecord,
