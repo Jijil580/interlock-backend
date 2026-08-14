@@ -34,7 +34,7 @@ const WorkerReportSchema = new mongoose.Schema({ siteName:String, phoneNo:String
 const DailyReportSchema = new mongoose.Schema({ date:String, siteName:String, siteId:String, siteStatus:String, workersCount:String, totalArea:String, completedToday:String, totalCompleted:String, interlockType:String, dayNotes:String, materialsUnloaded:String, materialQty:String, equipment:String, supplierName:String, materialRemarks:String, extraWorkDesc:String, extraWorkQty:String, extraWorkCost:String, extraWorkRemarks:String, workerEntries:[{workerName:String,attendance:String,dutyArea:String,workDone:String,salary:Number,amountEarned:Number,paymentGiven:Number,pending:Number,remarks:String,workCategory:String,workArea:Number,unit:String,rate:Number,loadingCharge:Number,unloadingCharge:Number,paymentMode:String}], payments:Array, totalPayments:Number, totalReceived:Number, complaints:String, actionTaken:String, complaintRemarks:String, addedBy:String, newSite:String, runningSite:String, workersDetail:String, materialSupply:String, dayNote:String, expenses:String, workerPayments:[{workerName:String,amount:Number,date:String,note:String}] }, {timestamps:true});
 const WorkPlanSchema = new mongoose.Schema({ date:String, siteName:String, task:String, workers:String, materials:String, note:String, status:{type:String,default:'planned'}, fromDate:String, toDate:String, site:String, plannedWork:String, supervisor:String, workersAllocated:String, materialsNeeded:String, estimatedCost:Number, paymentPlan:String, notes:String, archived:{type:Boolean,default:false}, addedBy:String }, {timestamps:true});
 const WorkerSchema = new mongoose.Schema({ name:String, phone:String, address:String, role:String, workerType:String, workerCategory:String, status:{type:String,default:'Active'}, workLocationType:String, paymentType:String, customPaymentType:String, rateType:String, rateAmount:Number, totalProduction:{type:Number,default:0}, totalEarnings:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
-const WorkerPaymentSchema = new mongoose.Schema({ workerName:String, amount:Number, cashAmount:Number, advanceAdjusted:Number, date:String, mode:String, note:String, addedBy:String, source:String, reportDate:String }, {timestamps:true});
+const WorkerPaymentSchema = new mongoose.Schema({ workerId:String, workerName:String, personType:String, amount:Number, cashAmount:Number, advanceAdjusted:Number, date:String, paidAt:Date, mode:String, note:String, addedBy:String, source:String, reportDate:String }, {timestamps:true});
 const PurchaseSchema = new mongoose.Schema({ date:String, supplierName:String, supplierPhone:String, supplierMobile:String, supplierAddress:String, itemName:String, itemType:String, quantity:String, unit:String, unitPrice:String, totalAmount:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, vehicleNumber:String, vehicleType:String, driverName:String, driverPhone:String, deliveryAddress:String, note:String, addedBy:String, source:String, sourceId:String }, {timestamps:true});
 const CompanyPurchaseSchema = new mongoose.Schema({ date:String, materialName:String, quantity:Number, unit:String, amount:Number, paymentMode:String, accountName:String, note:String, purchasedBy:String, purchasedByRole:String }, {timestamps:true});
 const SupervisorCashReceiptSchema = new mongoose.Schema({ date:String, supervisorName:String, amount:Number, paymentMode:String, receivedBy:String, receivedByRole:String, note:String }, {timestamps:true});
@@ -67,7 +67,7 @@ const DriverReportSchema = new mongoose.Schema({
   expenses:[{category:String,amount:Number,liters:Number,note:String}],
   vehicleKm:{startKm:Number,endKm:Number,totalKm:Number,note:String},
   driverChargeType:String, driverCharge:Number, driverWageEarned:Number, driverWagePaid:Number, driverWagePending:Number, driverWageCredit:Number,
-  payments:[{amount:Number,cashAmount:Number,advanceAdjusted:Number,date:String,mode:String,note:String,addedBy:String}],
+  payments:[{transactionId:String,amount:Number,cashAmount:Number,advanceAdjusted:Number,date:String,paidAt:Date,mode:String,note:String,addedBy:String}],
   remarks:String, addedBy:String, sourcePurchaseId:String, company:String
 }, {timestamps:true});
 const ReportAuditSchema = new mongoose.Schema({
@@ -80,7 +80,7 @@ const SalaryRecordSchema = new mongoose.Schema({
   monthlySalary:Number, incentive:Number, absentDays:Number, presentDays:Number,
   calculatedSalary:Number, manualSalary:Number, payableAmount:Number,
   paidAmount:{type:Number,default:0}, pendingAmount:Number, status:{type:String,default:'pending'},
-  payments:[{amount:Number,cashAmount:Number,advanceAdjusted:Number,date:String,mode:String,note:String,paidBy:String}],
+  payments:[{amount:Number,cashAmount:Number,advanceAdjusted:Number,date:String,paidAt:Date,mode:String,note:String,paidBy:String}],
   addedBy:String, updatedBy:String,
 }, {timestamps:true});
 SalaryRecordSchema.index({ employeeId:1, month:1 }, { unique:true });
@@ -90,6 +90,19 @@ const SalaryAdvanceSchema = new mongoose.Schema({
   date:String, mode:String, note:String, givenBy:String,
   adjustments:[{amount:Number,date:String,adjustedBy:String,referenceType:String,referenceId:String}],
 }, {timestamps:true});
+const AttendanceRegisterSchema = new mongoose.Schema({
+  date:{ type:String, required:true, unique:true },
+  entries:[{
+    personId:String,
+    personName:String,
+    personType:String,
+    designation:String,
+    status:{ type:String, enum:['present','absent'], default:'present' },
+  }],
+  recordedBy:String,
+  updatedBy:String,
+}, {timestamps:true});
+AttendanceRegisterSchema.index({ date:-1 });
 const ProductionSiteSchema = new mongoose.Schema({
   date:String, shift:String, workerId:String, workerName:String,
   itemId:String, itemName:String, category:String, shape:String, color:String, size:String, thickness:String, unitType:String,
@@ -509,6 +522,8 @@ async function receiveCustomerPayment(mobile, amount) {
 }
 
 async function payDriverLedgerTotal({ driverName, driverMobile, amount, cashAmount, advanceAdjusted, date, mode, note, addedBy }) {
+  const transactionId = new mongoose.Types.ObjectId().toString();
+  const paidAt = new Date();
   let remaining = +(amount) || 0;
   let remainingAdvance = Math.min(remaining, Math.max(0, +(advanceAdjusted) || 0));
   let remainingCash = Math.max(0, +(cashAmount) || 0);
@@ -527,10 +542,12 @@ async function payDriverLedgerTotal({ driverName, driverMobile, amount, cashAmou
     const advancePart = Math.min(applied, remainingAdvance);
     const cashPart = Math.min(applied - advancePart, remainingCash);
     report.payments = [...(report.payments || []), {
+      transactionId,
       amount: applied,
       cashAmount: cashPart,
       advanceAdjusted: advancePart,
       date: date || new Date().toISOString().slice(0, 10),
+      paidAt,
       mode: mode || 'Cash',
       note: note || 'Driver wage payment',
       addedBy: addedBy || '',
@@ -556,10 +573,12 @@ async function payDriverLedgerTotal({ driverName, driverMobile, amount, cashAmou
       });
     }
     creditReport.payments = [...(creditReport.payments || []), {
+      transactionId,
       amount: remaining,
       cashAmount: remainingCash,
       advanceAdjusted: remainingAdvance,
       date: date || new Date().toISOString().slice(0, 10),
+      paidAt,
       mode: mode || 'Cash',
       note: note || 'Driver advance / extra payment',
       addedBy: addedBy || '',
@@ -681,6 +700,7 @@ const DriverReport = mongoose.model('DriverReport', DriverReportSchema);
 const ReportAudit = mongoose.model('ReportAudit', ReportAuditSchema);
 const SalaryRecord = mongoose.model('SalaryRecord', SalaryRecordSchema);
 const SalaryAdvance = mongoose.model('SalaryAdvance', SalaryAdvanceSchema);
+const AttendanceRegister = mongoose.model('AttendanceRegister', AttendanceRegisterSchema);
 const MasterInterlock = mongoose.model('MasterInterlock', MasterDataSchema);
 const MasterHollowBrick = mongoose.model('MasterHollowBrick', MasterDataSchema);
 const MasterMaterial = mongoose.model('MasterMaterial', new mongoose.Schema({...MasterDataSchema.obj},{timestamps:true}));
@@ -875,12 +895,134 @@ app.post('/api/salary-records/:id/payment', async(req,res)=>{
     });
     const amount = cashAmount + advance.used;
     if (amount <= 0) return res.status(400).json({ message:'Cash amount or available advance is required' });
-    record.payments = [...(record.payments || []), { amount, cashAmount, advanceAdjusted:advance.used, date:req.body.date || new Date().toISOString().slice(0,10), mode:req.body.mode || 'Cash', note:req.body.note || '', paidBy:req.body.paidBy || '' }];
+    record.payments = [...(record.payments || []), { amount, cashAmount, advanceAdjusted:advance.used, date:req.body.date || new Date().toISOString().slice(0,10), paidAt:new Date(), mode:req.body.mode || 'Cash', note:req.body.note || '', paidBy:req.body.paidBy || '' }];
     record.paidAmount = (record.payments || []).reduce((sum,p)=>sum+(+(p.amount)||0),0);
     record.pendingAmount = Math.max(0, +(record.payableAmount - record.paidAmount).toFixed(2));
     record.status = record.pendingAmount <= 0 ? 'paid' : 'partially-paid';
     await record.save();
     res.json({ ...record.toObject(), advanceUsed:advance.used });
+  } catch(e) { res.status(400).json({ message:e.message }); }
+});
+
+app.get('/api/salary-payment-ledger', async(req,res)=>{
+  try {
+    const { kind = 'all', personType, personName, givenBy, date, fromDate, toDate } = req.query;
+    const [advances, salaryRecords, driverReports, workerPayments, workers] = await Promise.all([
+      kind === 'salary' ? [] : SalaryAdvance.find({}).lean(),
+      kind === 'advance' ? [] : SalaryRecord.find({}).lean(),
+      kind === 'advance' ? [] : DriverReport.find({ 'payments.0':{ $exists:true } }).lean(),
+      kind === 'advance' ? [] : WorkerPayment.find({}).lean(),
+      kind === 'advance' ? [] : Worker.find({}).lean(),
+    ]);
+    const rows = [];
+    advances.forEach(row => rows.push({
+      id:`advance-${row._id}`, kind:'advance', personType:row.personType || '', recipient:row.personName || '',
+      givenBy:row.givenBy || '', date:row.date || '', dateTime:row.createdAt || row.updatedAt,
+      amount:+(row.amount) || 0, cashAmount:+(row.amount) || 0, advanceAdjusted:0,
+      mode:row.mode || 'Cash', note:row.note || '', source:'Advance Salary',
+    }));
+    salaryRecords.forEach(record => (record.payments || []).forEach((payment,index) => rows.push({
+      id:`monthly-${record._id}-${payment._id || index}`, kind:'salary', personType:record.role || '', recipient:record.employeeName || '',
+      givenBy:payment.paidBy || '', date:payment.date || '', dateTime:payment.paidAt || record.updatedAt || record.createdAt,
+      amount:+(payment.amount) || 0, cashAmount:+(payment.cashAmount ?? payment.amount) || 0, advanceAdjusted:+(payment.advanceAdjusted) || 0,
+      mode:payment.mode || 'Cash', note:payment.note || '', source:`${record.role === 'supervisor' ? 'Supervisor' : 'Office User'} Salary${record.month ? ` - ${record.month}` : ''}`,
+    })));
+    const driverPaymentRows = new Map();
+    driverReports.forEach(report => (report.payments || []).forEach((payment,index) => {
+      const key = payment.transactionId || `${report._id}-${payment._id || index}`;
+      if (!driverPaymentRows.has(key)) driverPaymentRows.set(key, {
+        id:`driver-${key}`, kind:'salary', personType:'driver', recipient:report.driverName || '',
+        givenBy:payment.addedBy || '', date:payment.date || '', dateTime:payment.paidAt || report.updatedAt || report.createdAt,
+        amount:0, cashAmount:0, advanceAdjusted:0,
+        mode:payment.mode || 'Cash', note:payment.note || '', source:'Driver Salary',
+      });
+      const row = driverPaymentRows.get(key);
+      row.amount += +(payment.amount) || 0;
+      row.cashAmount += +(payment.cashAmount ?? payment.amount) || 0;
+      row.advanceAdjusted += +(payment.advanceAdjusted) || 0;
+    }));
+    rows.push(...driverPaymentRows.values());
+    const workerTypeMap = new Map(workers.map(worker => [String(worker.name || '').toLowerCase(), normalizeWorkerType(worker) === 'Site Worker' ? 'site-worker' : 'production-worker']));
+    workerPayments.forEach(payment => {
+      const inferredType = String(payment.source || '').includes('site') ? 'site-worker' : (workerTypeMap.get(String(payment.workerName || '').toLowerCase()) || 'production-worker');
+      const finalType = payment.personType || inferredType;
+      rows.push({
+        id:`worker-${payment._id}`, kind:'salary', personType:finalType, recipient:payment.workerName || '',
+        givenBy:payment.addedBy || '', date:payment.date || '', dateTime:payment.paidAt || payment.createdAt || payment.updatedAt,
+        amount:+(payment.amount) || 0, cashAmount:+(payment.cashAmount ?? payment.amount) || 0, advanceAdjusted:+(payment.advanceAdjusted) || 0,
+        mode:payment.mode || 'Cash', note:payment.note || '', source:finalType === 'site-worker' ? 'Site Worker Salary' : 'Production Worker Salary',
+      });
+    });
+    const needle = value => String(value || '').trim().toLowerCase();
+    const filtered = rows.filter(row => {
+      if (kind !== 'all' && row.kind !== kind) return false;
+      if (personType && row.personType !== personType) return false;
+      if (personName && !needle(row.recipient).includes(needle(personName))) return false;
+      if (givenBy && !needle(row.givenBy).includes(needle(givenBy))) return false;
+      if (date && row.date !== date) return false;
+      if (fromDate && row.date < fromDate) return false;
+      if (toDate && row.date > toDate) return false;
+      return true;
+    }).sort((a,b) => (b.date || '').localeCompare(a.date || '') || new Date(b.dateTime || 0) - new Date(a.dateTime || 0));
+    res.json({
+      records:filtered,
+      summary:{
+        count:filtered.length,
+        totalAmount:filtered.reduce((sum,row)=>sum+row.amount,0),
+        totalCash:filtered.reduce((sum,row)=>sum+row.cashAmount,0),
+        totalAdvanceAdjusted:filtered.reduce((sum,row)=>sum+row.advanceAdjusted,0),
+      },
+    });
+  } catch(e) { res.status(500).json({ message:e.message }); }
+});
+
+app.get('/api/attendance-register', async(req,res)=>{
+  try {
+    const { date, month, fromDate, toDate, personName, designation, status, recordedBy } = req.query;
+    const filter = {};
+    if (date) filter.date = date;
+    else if (month) filter.date = { $gte:`${month}-01`, $lte:`${month}-31` };
+    else if (fromDate || toDate) {
+      filter.date = {};
+      if (fromDate) filter.date.$gte = fromDate;
+      if (toDate) filter.date.$lte = toDate;
+    }
+    if (recordedBy) filter.$or = [{ recordedBy:{ $regex:escapeRegex(recordedBy), $options:'i' } }, { updatedBy:{ $regex:escapeRegex(recordedBy), $options:'i' } }];
+    const records = await AttendanceRegister.find(filter).sort({ date:-1 }).lean();
+    const entryMatches = entry => {
+      if (personName && !String(entry.personName || '').toLowerCase().includes(String(personName).toLowerCase())) return false;
+      if (designation && entry.designation !== designation) return false;
+      if (status && entry.status !== status) return false;
+      return true;
+    };
+    res.json(records.map(record => ({ ...record, entries:(record.entries || []).filter(entryMatches) })));
+  } catch(e) { res.status(500).json({ message:e.message }); }
+});
+
+app.post('/api/attendance-register', async(req,res)=>{
+  try {
+    const date = String(req.body.date || '').trim();
+    if (!date) return res.status(400).json({ message:'Attendance date is required' });
+    const entries = (Array.isArray(req.body.entries) ? req.body.entries : []).filter(entry => entry.personName).map(entry => ({
+      personId:String(entry.personId || ''),
+      personName:String(entry.personName || '').trim(),
+      personType:String(entry.personType || '').trim(),
+      designation:String(entry.designation || '').trim(),
+      status:entry.status === 'absent' ? 'absent' : 'present',
+    }));
+    if (!entries.length) return res.status(400).json({ message:'At least one attendance entry is required' });
+    const existing = await AttendanceRegister.findOne({ date });
+    const record = await AttendanceRegister.findOneAndUpdate(
+      { date },
+      {
+        date,
+        entries,
+        recordedBy:existing?.recordedBy || req.body.recordedBy || req.body.updatedBy || '',
+        updatedBy:req.body.updatedBy || req.body.recordedBy || '',
+      },
+      { new:true, upsert:true, runValidators:true, setDefaultsOnInsert:true }
+    );
+    res.json(record);
   } catch(e) { res.status(400).json({ message:e.message }); }
 });
 app.post('/api/login', async(req,res)=>{
@@ -1596,7 +1738,7 @@ async function updateWorkerEarnings(workerName, qty, amount) {
 }
 
 async function recordWorkerPayment(workerName, amount, date, source, addedBy, note, mode = 'Cash', extra = {}) {
-  const payment = await WorkerPayment.create({ workerName, amount, date, source: source || 'manual', addedBy, note, mode, ...extra });
+  const payment = await WorkerPayment.create({ workerName, amount, date, paidAt:new Date(), source: source || 'manual', addedBy, note, mode, ...extra });
   await syncWorkerTotals(workerName);
   return payment;
 }
@@ -1938,7 +2080,7 @@ app.post('/api/workerpayments', async(req,res)=>{
     });
     const paymentAmount = cashAmount + advance.used;
     if (paymentAmount <= 0) return res.status(400).json({ message: 'Cash amount or available advance is required' });
-    const payment = await recordWorkerPayment(workerName, paymentAmount, date || new Date().toISOString().split('T')[0], source || 'worker-payment', addedBy, note, mode || 'Cash', { cashAmount, advanceAdjusted:advance.used });
+    const payment = await recordWorkerPayment(workerName, paymentAmount, date || new Date().toISOString().split('T')[0], source || 'worker-payment', addedBy, note, mode || 'Cash', { workerId:worker?._id ? String(worker._id) : '', personType, cashAmount, advanceAdjusted:advance.used });
     res.json(payment);
   } catch(e) { res.status(400).json({ message: e.message }); }
 });
@@ -2017,10 +2159,12 @@ app.post('/api/driverreports/:id/payment', async(req,res)=>{
     const amount = cashAmount + advance.used;
     if (amount <= 0) return res.status(400).json({ message: 'Cash amount or available advance is required' });
     report.payments = [...(report.payments || []), {
+      transactionId:new mongoose.Types.ObjectId().toString(),
       amount,
       cashAmount,
       advanceAdjusted:advance.used,
       date: req.body.date || new Date().toISOString().slice(0, 10),
+      paidAt: new Date(),
       mode: req.body.mode || 'Cash',
       note: req.body.note || '',
       addedBy: req.body.addedBy || '',
@@ -3519,6 +3663,7 @@ const exportSources = () => ({
   driverReports: DriverReport,
   salaryRecords: SalaryRecord,
   salaryAdvances: SalaryAdvance,
+  attendanceRegisters: AttendanceRegister,
   masterInterlocks: MasterInterlock,
   masterHollowBricks: MasterHollowBrick,
   masterMaterials: MasterMaterial,
