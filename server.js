@@ -31,7 +31,7 @@ const QuotationSchema = new mongoose.Schema({
 const CustomerSchema = new mongoose.Schema({ mobile:{type:String,unique:true}, name:String, address:String, gstNumber:String, notes:String, totalPurchases:{type:Number,default:0}, totalSalesAmount:{type:Number,default:0}, totalDiscount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, totalQuantity:{type:Number,default:0}, company:String, addedBy:String }, {timestamps:true});
 const SiteWorkSchema = new mongoose.Schema({ customerName:String, phone:String, siteLocation:String, location:String, interlockItemId:String, interlockType:String, interlockColor:String, selectedWorkers:[String], startDate:String, endDate:String, status:{type:String,default:'running'}, workUnit:String, workSize:String, ratePerUnit:String, baseWorkCost:String, extraWork:Array, extraMaterials:Array, materialCost:String, laborCost:String, totalCost:String, payments:Array, legacyReceived:Number, totalReceived:Number, pendingAmount:String, paymentStatus:{type:String,default:'pending'}, paymentMode:String, note:String, addedBy:String, workStatus:String, totalAmount:Number, paidAmount:Number, company:String }, {timestamps:true});
 const WorkerReportSchema = new mongoose.Schema({ siteName:String, phoneNo:String, startingDate:String, workerName:String, totalArea:String, workingCost:String, extraWork:String, extraMaterial:String, totalWorkingArea:String, totalAmount:String, note:String, paymentMode:String, upiId:String, bankName:String, bankBranch:String, bankAccount:String, amountReceivedBy:String, materialSupply:String, materialType:String, signatures:{supervisor:Boolean,office:Boolean,admin:Boolean}, addedBy:String }, {timestamps:true});
-const DailyReportSchema = new mongoose.Schema({ date:String, siteName:String, siteId:String, siteStatus:String, workersCount:String, totalArea:String, completedToday:String, totalCompleted:String, interlockType:String, dayNotes:String, materialsUnloaded:String, materialQty:String, equipment:String, supplierName:String, materialRemarks:String, extraWorkDesc:String, extraWorkQty:String, extraWorkCost:String, extraWorkRemarks:String, workerEntries:[{workerName:String,attendance:String,dutyArea:String,workDone:String,salary:Number,amountEarned:Number,paymentGiven:Number,pending:Number,remarks:String,workCategory:String,workArea:Number,unit:String,rate:Number,loadingCharge:Number,unloadingCharge:Number,paymentMode:String}], payments:Array, totalPayments:Number, totalReceived:Number, complaints:String, actionTaken:String, complaintRemarks:String, addedBy:String, newSite:String, runningSite:String, workersDetail:String, materialSupply:String, dayNote:String, expenses:String, workerPayments:[{workerName:String,amount:Number,date:String,note:String}] }, {timestamps:true});
+const DailyReportSchema = new mongoose.Schema({ date:String, entrySection:{type:String,enum:['site','workers','expenses','office']}, siteName:String, siteId:String, siteStatus:String, workersCount:String, totalArea:String, completedToday:String, totalCompleted:String, interlockType:String, dayNotes:String, materialsUnloaded:String, materialQty:String, equipment:String, supplierName:String, materialRemarks:String, extraWorkDesc:String, extraWorkQty:String, extraWorkCost:String, extraWorkRemarks:String, workerEntries:[{workerName:String,attendance:String,dutyArea:String,workDone:String,salary:Number,amountEarned:Number,paymentGiven:Number,pending:Number,remarks:String,workCategory:String,workArea:Number,unit:String,rate:Number,loadingCharge:Number,unloadingCharge:Number,paymentMode:String}], payments:Array, totalPayments:Number, totalReceived:Number, complaints:String, actionTaken:String, complaintRemarks:String, addedBy:String, newSite:String, runningSite:String, workersDetail:String, materialSupply:String, dayNote:String, expenses:String, workerPayments:[{workerName:String,amount:Number,date:String,note:String}] }, {timestamps:true});
 const WorkPlanSchema = new mongoose.Schema({ date:String, siteName:String, task:String, workers:String, materials:String, note:String, status:{type:String,default:'planned'}, fromDate:String, toDate:String, site:String, plannedWork:String, supervisor:String, workersAllocated:String, materialsNeeded:String, estimatedCost:Number, paymentPlan:String, notes:String, archived:{type:Boolean,default:false}, addedBy:String }, {timestamps:true});
 const WorkerSchema = new mongoose.Schema({ name:String, phone:String, address:String, role:String, workerType:String, workerCategory:String, status:{type:String,default:'Active'}, workLocationType:String, paymentType:String, customPaymentType:String, rateType:String, rateAmount:Number, totalProduction:{type:Number,default:0}, totalEarnings:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
 const WorkerPaymentSchema = new mongoose.Schema({ workerId:String, workerName:String, personType:String, amount:Number, cashAmount:Number, advanceAdjusted:Number, date:String, paidAt:Date, mode:String, note:String, addedBy:String, source:String, reportDate:String }, {timestamps:true});
@@ -1595,7 +1595,44 @@ app.get('/api/workerreport', async(req,res)=>res.json(await WorkerReport.find().
 app.post('/api/workerreport', async(req,res)=>res.json(await WorkerReport.create(req.body)));
 app.put('/api/workerreport/:id', async(req,res)=>res.json(await WorkerReport.findByIdAndUpdate(req.params.id,req.body,{new:true})));
 
-app.get('/api/dailyreport', async(req,res)=>res.json(await DailyReport.find().sort({createdAt:-1})));
+const DAILY_REPORT_SECTIONS = new Set(['site','workers','expenses','office']);
+
+function inferDailyReportSections(source = {}) {
+  const report = source?.toObject ? source.toObject() : source;
+  if (DAILY_REPORT_SECTIONS.has(report.entrySection)) return [report.entrySection];
+
+  const sections = [];
+  const paymentKinds = (report.payments || []).map(payment => String(payment?.type || '').trim().toLowerCase());
+  const hasSiteReceipt = paymentKinds.includes('site payment received');
+  const hasOfficeCash = paymentKinds.some(type => ['cash received from office','cash given to office'].includes(type));
+  const hasExpenses = paymentKinds.some(type => type && type !== 'worker payment' && type !== 'site payment received' && !['cash received from office','cash given to office'].includes(type));
+  const hasWorkers = (report.workerEntries || []).length > 0 || Boolean(report.workersDetail) || (report.workerPayments || []).length > 0;
+  const hasSiteDetails = Boolean(
+    report.completedToday || report.totalCompleted || report.interlockType || report.materialsUnloaded ||
+    report.materialQty || report.equipment || report.supplierName || report.extraWorkDesc ||
+    report.extraWorkQty || report.extraWorkCost || report.newSite || report.runningSite ||
+    report.materialSupply || hasSiteReceipt || (report.siteName && (report.dayNotes || report.dayNote))
+  );
+  const hasOfficeDetails = Boolean(report.complaints || report.actionTaken || report.complaintRemarks || hasOfficeCash || (!report.siteName && (report.dayNotes || report.dayNote)));
+
+  if (hasSiteDetails) sections.push('site');
+  if (hasWorkers) sections.push('workers');
+  if (hasExpenses || report.expenses) sections.push('expenses');
+  if (hasOfficeDetails) sections.push('office');
+  if (!sections.length && report.siteName) sections.push('site');
+  if (!sections.length) sections.push('office');
+  return sections;
+}
+
+function dailyReportResponse(report) {
+  const data = report?.toObject ? report.toObject() : report;
+  return { ...data, entrySections:inferDailyReportSections(data) };
+}
+
+app.get('/api/dailyreport', async(req,res)=>{
+  const reports = await DailyReport.find().sort({createdAt:-1});
+  res.json(reports.map(dailyReportResponse));
+});
 app.post('/api/dailyreport', async(req,res)=>{
   try {
     const body = normalizeDailyReportBody(req.body);
@@ -1614,7 +1651,7 @@ app.post('/api/dailyreport', async(req,res)=>{
       const site = await SiteWork.findOne({ customerName: report.siteName });
       if (site) await recalcSiteFinancials(site);
     }
-    res.json(report);
+    res.json(dailyReportResponse(report));
   } catch(e) { res.status(400).json({ message: e.message }); }
 });
 app.put('/api/dailyreport/:id', async(req,res)=>{
@@ -1647,7 +1684,7 @@ app.put('/api/dailyreport/:id', async(req,res)=>{
       } else await recalcSiteFinancials(key);
     }
     await createReportAudit({ req, recordType: 'Supervisor Daily Report', action: 'edit', before: oldReport, after: newReport });
-    res.json(newReport);
+    res.json(dailyReportResponse(newReport));
   } catch(e) { res.status(e.statusCode || 400).json({ message: e.message }); }
 });
 app.delete('/api/dailyreport/:id', async(req,res)=>{
@@ -1736,11 +1773,14 @@ function normalizeWorkerEntry(we = {}) {
 }
 
 function normalizeDailyReportBody(body = {}) {
-  return {
+  const normalized = {
     ...body,
     payments: (body.payments || []).filter(p => p.type !== 'Worker Payment'),
     workerEntries: (body.workerEntries || []).map(normalizeWorkerEntry)
   };
+  delete normalized.entrySections;
+  if (!DAILY_REPORT_SECTIONS.has(normalized.entrySection)) delete normalized.entrySection;
+  return normalized;
 }
 
 async function findDuplicateWorkerEntry(report, excludeId) {
