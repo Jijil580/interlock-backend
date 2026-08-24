@@ -34,7 +34,7 @@ const WorkerReportSchema = new mongoose.Schema({ siteName:String, phoneNo:String
 const DailyReportSchema = new mongoose.Schema({ date:String, entrySection:{type:String,enum:['site','workers','expenses','office']}, siteName:String, siteId:String, siteStatus:String, workersCount:String, totalArea:String, completedToday:String, totalCompleted:String, interlockType:String, dayNotes:String, materialsUnloaded:String, materialQty:String, equipment:String, supplierName:String, materialRemarks:String, extraWorkDesc:String, extraWorkQty:String, extraWorkCost:String, extraWorkRemarks:String, workerEntries:[{workerName:String,attendance:String,dutyArea:String,workDone:String,salary:Number,amountEarned:Number,paymentGiven:Number,pending:Number,remarks:String,workCategory:String,workArea:Number,unit:String,rate:Number,loadingCharge:Number,unloadingCharge:Number,paymentMode:String}], payments:Array, totalPayments:Number, totalReceived:Number, complaints:String, actionTaken:String, complaintRemarks:String, addedBy:String, newSite:String, runningSite:String, workersDetail:String, materialSupply:String, dayNote:String, expenses:String, workerPayments:[{workerName:String,amount:Number,date:String,note:String}] }, {timestamps:true});
 const WorkPlanSchema = new mongoose.Schema({ date:String, siteName:String, task:String, workers:String, materials:String, note:String, status:{type:String,default:'planned'}, fromDate:String, toDate:String, site:String, plannedWork:String, supervisor:String, workersAllocated:String, materialsNeeded:String, estimatedCost:Number, paymentPlan:String, notes:String, archived:{type:Boolean,default:false}, addedBy:String }, {timestamps:true});
 const WorkerSchema = new mongoose.Schema({ name:String, phone:String, address:String, role:String, workerType:String, workerCategory:String, status:{type:String,default:'Active'}, workLocationType:String, paymentType:String, customPaymentType:String, rateType:String, rateAmount:Number, totalProduction:{type:Number,default:0}, totalEarnings:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
-const WorkerPaymentSchema = new mongoose.Schema({ workerId:String, workerName:String, personType:String, amount:Number, cashAmount:Number, advanceAdjusted:Number, date:String, paidAt:Date, mode:String, note:String, addedBy:String, source:String, reportDate:String }, {timestamps:true});
+const WorkerPaymentSchema = new mongoose.Schema({ workerId:String, workerName:String, personType:String, amount:Number, cashAmount:Number, advanceAdjusted:Number, date:String, paidAt:Date, mode:String, note:String, addedBy:String, source:String, reportDate:String, paymentScope:String, weekStart:String, weekEnd:String }, {timestamps:true});
 const PurchaseSchema = new mongoose.Schema({ date:String, supplierName:String, supplierPhone:String, supplierMobile:String, supplierAddress:String, itemName:String, itemType:String, quantity:String, unit:String, unitPrice:String, totalAmount:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, vehicleNumber:String, vehicleType:String, driverName:String, driverPhone:String, deliveryAddress:String, note:String, addedBy:String, source:String, sourceId:String }, {timestamps:true});
 const CompanyPurchaseSchema = new mongoose.Schema({ date:String, materialName:String, quantity:Number, unit:String, amount:Number, paymentMode:String, accountName:String, note:String, purchasedBy:String, purchasedByRole:String }, {timestamps:true});
 const SupervisorCashReceiptSchema = new mongoose.Schema({ date:String, supervisorName:String, amount:Number, paymentMode:String, receivedBy:String, receivedByRole:String, note:String }, {timestamps:true});
@@ -987,6 +987,7 @@ app.get('/api/salary-payment-ledger', async(req,res)=>{
         givenBy:payment.addedBy || '', date:payment.date || '', dateTime:payment.paidAt || payment.createdAt || payment.updatedAt,
         amount:+(payment.amount) || 0, cashAmount:+(payment.cashAmount ?? payment.amount) || 0, advanceAdjusted:+(payment.advanceAdjusted) || 0,
         mode:payment.mode || 'Cash', note:payment.note || '', source:finalType === 'site-worker' ? 'Site Worker Salary' : 'Production Worker Salary',
+        paymentScope:payment.paymentScope || 'all', weekStart:payment.weekStart || '', weekEnd:payment.weekEnd || '',
       });
     });
     const needle = value => String(value || '').trim().toLowerCase();
@@ -2395,16 +2396,153 @@ async function buildWorkerLedger(workerName, dateFilter = {}) {
   return buildProductionWorkerReport(workerName, dateFilter);
 }
 
+function indiaDateString() {
+  return new Date(Date.now() + (330 * 60 * 1000)).toISOString().slice(0, 10);
+}
+
+function shiftDateString(value, days) {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function salaryWeekRange(value = indiaDateString()) {
+  const safe = /^\d{4}-\d{2}-\d{2}$/.test(String(value || '')) ? String(value) : indiaDateString();
+  const date = new Date(`${safe}T00:00:00.000Z`);
+  const start = shiftDateString(safe, -date.getUTCDay());
+  return { start, end:shiftDateString(start, 6) };
+}
+
+function allocateWeeklyPayment(buckets, amount, predicate) {
+  let remaining = Math.max(0, +(amount) || 0);
+  const candidates = [...buckets.values()].filter(predicate).sort((a,b)=>a.weekStart.localeCompare(b.weekStart));
+  for (const bucket of candidates) {
+    if (remaining <= 0) break;
+    const due = Math.max(0, bucket.earned - bucket.paid);
+    const applied = Math.min(due, remaining);
+    bucket.paid += applied;
+    bucket.manualPaid += applied;
+    remaining -= applied;
+  }
+  return remaining;
+}
+
+async function buildWorkerWeeklySalary(worker, workerType, asOf = indiaDateString()) {
+  const personType = workerType === 'Site Worker' ? 'site-worker' : 'production-worker';
+  const current = salaryWeekRange(asOf);
+  const earningRows = [];
+
+  if (workerType === 'Production Worker') {
+    const [productionRows, dispatchRows] = await Promise.all([
+      ProductionSiteEntry.find({ workerName:worker.name, producedQty:{ $gt:0 } }).select('date totalAmount paymentGiven').lean(),
+      LoadingOperation.find({ workerName:worker.name, workerType:'production-worker' }).select('date totalAmount paymentGiven').lean(),
+    ]);
+    productionRows.forEach(row=>earningRows.push({ date:row.date, earned:+(row.totalAmount)||0, paid:+(row.paymentGiven)||0 }));
+    dispatchRows.forEach(row=>earningRows.push({ date:row.date, earned:+(row.totalAmount)||0, paid:+(row.paymentGiven)||0 }));
+  } else {
+    const [dailyRows, dispatchRows] = await Promise.all([
+      DailyReport.find({ 'workerEntries.workerName':worker.name }).select('date workerEntries').lean(),
+      LoadingOperation.find({ workerName:worker.name, workerType:'site-worker' }).select('date totalAmount paymentGiven').lean(),
+    ]);
+    dailyRows.forEach(report=>(report.workerEntries||[]).forEach(entry=>{
+      if (entry.workerName !== worker.name) return;
+      const normalized = normalizeWorkerEntry(entry);
+      earningRows.push({ date:report.date, earned:normalized.amountEarned, paid:normalized.paymentGiven });
+    }));
+    dispatchRows.forEach(row=>earningRows.push({ date:row.date, earned:+(row.totalAmount)||0, paid:+(row.paymentGiven)||0 }));
+  }
+
+  const buckets = new Map();
+  const ensureBucket = (weekStart) => {
+    if (!buckets.has(weekStart)) buckets.set(weekStart, { weekStart, weekEnd:shiftDateString(weekStart,6), earned:0, paid:0, directPaid:0, manualPaid:0 });
+    return buckets.get(weekStart);
+  };
+  ensureBucket(current.start);
+  earningRows.forEach(row=>{
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(row.date||''))) return;
+    const range = salaryWeekRange(row.date);
+    const bucket = ensureBucket(range.start);
+    bucket.earned += Math.max(0, +(row.earned)||0);
+    const directPaid = Math.max(0, +(row.paid)||0);
+    bucket.paid += directPaid;
+    bucket.directPaid += directPaid;
+  });
+
+  const manualSources = workerType === 'Site Worker'
+    ? ['worker-ledger-site','worker-payment','manual']
+    : ['worker-ledger-production','worker-payment','manual'];
+  const manualPayments = await WorkerPayment.find({ workerName:worker.name, source:{ $in:manualSources } }).sort({ date:1, createdAt:1 }).lean();
+  manualPayments.forEach(payment=>{
+    const amount = Math.max(0, +(payment.amount)||0);
+    if (!amount) return;
+    if (payment.weekStart && buckets.has(payment.weekStart)) {
+      allocateWeeklyPayment(buckets, amount, bucket=>bucket.weekStart===payment.weekStart);
+    } else if (payment.paymentScope === 'current-week') {
+      allocateWeeklyPayment(buckets, amount, bucket=>bucket.weekStart===current.start);
+    } else if (payment.paymentScope === 'previous-weeks') {
+      allocateWeeklyPayment(buckets, amount, bucket=>bucket.weekStart<current.start);
+    } else {
+      allocateWeeklyPayment(buckets, amount, ()=>true);
+    }
+  });
+
+  const weeks = [...buckets.values()].map(bucket=>({
+    ...bucket,
+    paid:Math.min(bucket.earned,bucket.paid),
+    pending:Math.max(0,bucket.earned-bucket.paid),
+    isCurrent:bucket.weekStart===current.start,
+  })).sort((a,b)=>b.weekStart.localeCompare(a.weekStart));
+  const currentWeek = weeks.find(week=>week.isCurrent) || { weekStart:current.start, weekEnd:current.end, earned:0, paid:0, pending:0, isCurrent:true };
+  const previousWeeks = weeks.filter(week=>week.weekStart<current.start && week.earned>0);
+  return {
+    worker:{ _id:worker._id, name:worker.name, phone:worker.phone||'', workerType, totalEarnings:+(worker.totalEarnings)||0, totalPaid:+(worker.totalPaid)||0, totalPending:+(worker.totalPending)||0 },
+    currentWeek,
+    previousWeeks,
+    previousWeeksPending:previousWeeks.reduce((sum,week)=>sum+week.pending,0),
+    calculatedPending:weeks.reduce((sum,week)=>sum+week.pending,0),
+  };
+}
+
+app.get('/api/workers/weekly-salary', async(req,res)=>{
+  try {
+    const workerType = String(req.query.workerType||'').toLowerCase().includes('site') ? 'Site Worker' : 'Production Worker';
+    const workers = (await Worker.find().sort({ name:1 })).filter(worker=>normalizeWorkerType(worker)===workerType && isWorkerActive(worker));
+    const rows = await Promise.all(workers.map(worker=>buildWorkerWeeklySalary(worker,workerType,req.query.asOf)));
+    const visible = rows.filter(row=>row.currentWeek.earned>0 || row.previousWeeksPending>0 || row.worker.totalPending>0);
+    res.json({
+      workerType,
+      weekStart:salaryWeekRange(req.query.asOf).start,
+      weekEnd:salaryWeekRange(req.query.asOf).end,
+      workers:visible,
+      summary:{
+        currentWeekEarnings:visible.reduce((sum,row)=>sum+row.currentWeek.earned,0),
+        currentWeekPending:visible.reduce((sum,row)=>sum+row.currentWeek.pending,0),
+        previousWeeksPending:visible.reduce((sum,row)=>sum+row.previousWeeksPending,0),
+        totalPending:visible.reduce((sum,row)=>sum+row.calculatedPending,0),
+      },
+    });
+  } catch(e) { res.status(500).json({ message:e.message }); }
+});
+
 app.get('/api/workerpayments', async(req,res)=>res.json(await WorkerPayment.find().sort({date:-1})));
 app.post('/api/workerpayments', async(req,res)=>{
   try {
-    const { workerName, date, mode, note, addedBy, source } = req.body;
+    const { workerName, date, mode, note, addedBy, source, paymentScope = 'all', weekStart = '', weekEnd = '' } = req.body;
     if (!workerName) return res.status(400).json({ message: 'Worker name is required' });
     const worker = req.body.workerId ? await Worker.findById(req.body.workerId).catch(()=>null) : await Worker.findOne({ name:workerName });
-    const cashAmount = Math.max(0, +(req.body.amount) || 0);
-    const remainingPending = Math.max(0, (+(worker?.totalPending) || 0) - cashAmount);
-    const requestedAdvance = Math.min(remainingPending, Math.max(0, +(req.body.advanceRequested) || 0));
+    if (!worker) return res.status(404).json({ message: 'Worker not found' });
     const personType = req.body.personType || (String(source || '').includes('site') ? 'site-worker' : 'production-worker');
+    const workerType = personType === 'site-worker' ? 'Site Worker' : 'Production Worker';
+    const weekly = await buildWorkerWeeklySalary(worker, workerType, indiaDateString());
+    let targetPending = weekly.calculatedPending;
+    if (paymentScope === 'current-week') targetPending = weekly.currentWeek.pending;
+    else if (paymentScope === 'previous-weeks') targetPending = weekly.previousWeeksPending;
+    else if (paymentScope === 'selected-week') targetPending = weekly.previousWeeks.find(row=>row.weekStart===weekStart)?.pending || 0;
+    if (targetPending <= 0) return res.status(400).json({ message: 'No pending amount is available for the selected week' });
+    const cashAmount = Math.max(0, +(req.body.amount) || 0);
+    if (cashAmount > targetPending + 0.005) return res.status(400).json({ message: `Payment cannot exceed the selected pending amount of ${targetPending.toFixed(2)}` });
+    const remainingPending = Math.max(0, targetPending - cashAmount);
+    const requestedAdvance = Math.min(remainingPending, Math.max(0, +(req.body.advanceRequested) || 0));
     const advance = await consumeSalaryAdvance({
       personType,
       personId: worker?._id,
@@ -2417,7 +2555,12 @@ app.post('/api/workerpayments', async(req,res)=>{
     });
     const paymentAmount = cashAmount + advance.used;
     if (paymentAmount <= 0) return res.status(400).json({ message: 'Cash amount or available advance is required' });
-    const payment = await recordWorkerPayment(workerName, paymentAmount, date || new Date().toISOString().split('T')[0], source || 'worker-payment', addedBy, note, mode || 'Cash', { workerId:worker?._id ? String(worker._id) : '', personType, cashAmount, advanceAdjusted:advance.used });
+    const targetWeekStart = paymentScope === 'current-week' ? weekly.currentWeek.weekStart : weekStart;
+    const targetWeekEnd = paymentScope === 'current-week' ? weekly.currentWeek.weekEnd : (weekEnd || (targetWeekStart ? shiftDateString(targetWeekStart,6) : ''));
+    const payment = await recordWorkerPayment(workerName, paymentAmount, date || indiaDateString(), source || 'worker-payment', addedBy, note, mode || 'Cash', {
+      workerId:String(worker._id), personType, cashAmount, advanceAdjusted:advance.used,
+      paymentScope, weekStart:targetWeekStart, weekEnd:targetWeekEnd,
+    });
     res.json(payment);
   } catch(e) { res.status(400).json({ message: e.message }); }
 });
