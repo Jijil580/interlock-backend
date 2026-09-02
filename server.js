@@ -1,11 +1,12 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const crypto = require('crypto');
 require('dotenv').config();
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log('✅ MongoDB Connected!'))
@@ -26,7 +27,9 @@ const QuotationSchema = new mongoose.Schema({
     taxableAmount:Number, cgstPercent:Number, sgstPercent:Number, igstPercent:Number, cgstAmount:Number, sgstAmount:Number, igstAmount:Number, total:Number
   }],
   subtotal:Number, discountAmount:Number, taxableAmount:Number, cgstAmount:Number, sgstAmount:Number, igstAmount:Number, taxAmount:Number, total:Number, roundOff:Number,
-  status:{type:String,default:'draft'}, addedBy:String, company:String
+  status:{type:String,default:'draft'}, addedBy:String, company:String,
+  shareToken:{type:String,unique:true,sparse:true,index:true}, sharedAt:Date,
+  signature:{ dataUrl:String, signedBy:String, signedAt:Date }
 }, {timestamps:true});
 const CustomerSchema = new mongoose.Schema({ mobile:{type:String,unique:true}, name:String, address:String, gstNumber:String, notes:String, totalPurchases:{type:Number,default:0}, totalSalesAmount:{type:Number,default:0}, totalDiscount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, totalQuantity:{type:Number,default:0}, company:String, addedBy:String }, {timestamps:true});
 const SiteWorkSchema = new mongoose.Schema({ customerName:String, phone:String, siteLocation:String, location:String, interlockItemId:String, interlockType:String, interlockColor:String, selectedWorkers:[String], startDate:String, endDate:String, status:{type:String,default:'running'}, workUnit:String, workSize:String, ratePerUnit:String, baseWorkCost:String, extraWork:Array, extraMaterials:Array, materialCost:String, laborCost:String, totalCost:String, payments:Array, legacyReceived:Number, totalReceived:Number, pendingAmount:String, paymentStatus:{type:String,default:'pending'}, paymentMode:String, note:String, addedBy:String, workStatus:String, totalAmount:Number, paidAmount:Number, company:String }, {timestamps:true});
@@ -462,6 +465,18 @@ async function upsertSupplierFromPurchase(purchase, saveToMaster = true) {
     await supplier.save();
   }
   return supplier;
+}
+
+function createQuotationShareToken() {
+  return crypto.randomBytes(24).toString('hex');
+}
+
+async function ensureQuotationShareToken(quotation) {
+  if (quotation.shareToken) return quotation;
+  quotation.shareToken = createQuotationShareToken();
+  quotation.sharedAt = new Date();
+  await quotation.save();
+  return quotation;
 }
 
 async function recalcSupplierTotalsFromPurchases(purchase) {
@@ -1454,7 +1469,7 @@ app.post('/api/quotations', async(req,res)=>{
     const mobile = normalizeMobile(req.body.mobileNumber);
     if (!mobile || mobile.length < 10) return res.status(400).json({ message: 'Valid mobile number is required' });
     if (!Array.isArray(req.body.items) || !req.body.items.length) return res.status(400).json({ message: 'Add at least one product' });
-    const data = normalizeQuotation({ ...req.body, mobileNumber: mobile });
+    const data = normalizeQuotation({ ...req.body, mobileNumber: mobile, shareToken: req.body.shareToken || createQuotationShareToken(), sharedAt: new Date() });
     const quotation = await Quotation.create(data);
     await upsertCustomerBasic(quotation, req.body.saveToCustomerMaster !== false);
     res.json(quotation);
@@ -1465,10 +1480,51 @@ app.put('/api/quotations/:id', async(req,res)=>{
     if (!req.body.customer) return res.status(400).json({ message: 'Customer name is required' });
     const mobile = normalizeMobile(req.body.mobileNumber);
     if (!mobile || mobile.length < 10) return res.status(400).json({ message: 'Valid mobile number is required' });
-    const data = normalizeQuotation({ ...req.body, mobileNumber: mobile });
+    const current = await Quotation.findById(req.params.id);
+    if (!current) return res.status(404).json({ message: 'Quotation not found' });
+    const data = normalizeQuotation({
+      ...req.body,
+      mobileNumber: mobile,
+      shareToken: current.shareToken || req.body.shareToken || createQuotationShareToken(),
+      sharedAt: current.sharedAt || new Date(),
+      signature: current.signature,
+      status: current.signature?.dataUrl ? 'signed' : req.body.status,
+    });
     const quotation = await Quotation.findByIdAndUpdate(req.params.id, data, {new:true});
-    if (!quotation) return res.status(404).json({ message: 'Quotation not found' });
     await upsertCustomerBasic(quotation, req.body.saveToCustomerMaster !== false);
+    res.json(quotation);
+  } catch(e) { res.status(400).json({ message: e.message }); }
+});
+app.post('/api/quotations/:id/share', async(req,res)=>{
+  try {
+    const quotation = await Quotation.findById(req.params.id);
+    if (!quotation) return res.status(404).json({ message: 'Quotation not found' });
+    await ensureQuotationShareToken(quotation);
+    res.json(quotation);
+  } catch(e) { res.status(400).json({ message: e.message }); }
+});
+app.get('/api/public/quotations/:token', async(req,res)=>{
+  try {
+    res.set('Cache-Control', 'no-store');
+    const quotation = await Quotation.findOne({ shareToken: req.params.token }).select('-__v');
+    if (!quotation) return res.status(404).json({ message: 'Quotation link is invalid or unavailable' });
+    res.json(quotation);
+  } catch(e) { res.status(400).json({ message: e.message }); }
+});
+app.post('/api/public/quotations/:token/sign', async(req,res)=>{
+  try {
+    const quotation = await Quotation.findOne({ shareToken: req.params.token });
+    if (!quotation) return res.status(404).json({ message: 'Quotation link is invalid or unavailable' });
+    if (quotation.signature?.dataUrl) return res.status(409).json({ message: 'This quotation has already been signed' });
+    const dataUrl = String(req.body.signatureData || '');
+    const signedBy = String(req.body.signedBy || quotation.customer || '').trim().slice(0, 120);
+    if (!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(dataUrl) || dataUrl.length < 500 || dataUrl.length > 1500000) {
+      return res.status(400).json({ message: 'Please provide a valid signature' });
+    }
+    quotation.signature = { dataUrl, signedBy, signedAt: new Date() };
+    quotation.status = 'signed';
+    await quotation.save();
+    res.set('Cache-Control', 'no-store');
     res.json(quotation);
   } catch(e) { res.status(400).json({ message: e.message }); }
 });
