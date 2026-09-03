@@ -32,7 +32,7 @@ const QuotationSchema = new mongoose.Schema({
   signature:{ dataUrl:String, signedBy:String, signedAt:Date }
 }, {timestamps:true});
 const CustomerSchema = new mongoose.Schema({ mobile:{type:String,unique:true}, name:String, address:String, gstNumber:String, notes:String, totalPurchases:{type:Number,default:0}, totalSalesAmount:{type:Number,default:0}, totalDiscount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, totalQuantity:{type:Number,default:0}, company:String, addedBy:String }, {timestamps:true});
-const SiteWorkSchema = new mongoose.Schema({ customerName:String, phone:String, siteLocation:String, location:String, interlockItemId:String, interlockType:String, interlockColor:String, selectedWorkers:[String], startDate:String, endDate:String, status:{type:String,default:'running'}, workUnit:String, workSize:String, ratePerUnit:String, baseWorkCost:String, extraWork:Array, extraMaterials:Array, materialCost:String, laborCost:String, totalCost:String, payments:Array, legacyReceived:Number, totalReceived:Number, pendingAmount:String, paymentStatus:{type:String,default:'pending'}, paymentMode:String, note:String, addedBy:String, workStatus:String, totalAmount:Number, paidAmount:Number, company:String }, {timestamps:true});
+const SiteWorkSchema = new mongoose.Schema({ customerName:String, phone:String, siteLocation:String, location:String, interlockItemId:String, interlockType:String, interlockColor:String, selectedWorkers:[String], startDate:String, endDate:String, status:{type:String,default:'running'}, workUnit:String, workSize:String, ratePerUnit:String, baseWorkCost:String, extraWork:Array, extraMaterials:Array, materialCost:String, laborCost:String, totalCost:String, payments:Array, legacyReceived:Number, totalReceived:Number, pendingAmount:String, paymentStatus:{type:String,default:'pending'}, paymentMode:String, note:String, addedBy:String, workStatus:String, totalAmount:Number, paidAmount:Number, company:String, completionApprovalStatus:String, completionSubmittedBy:String, completionSubmittedAt:Date, userApprovedBy:String, userApprovedAt:Date, adminApprovedBy:String, adminApprovedAt:Date, completionRejectedBy:String, completionRejectedRole:String, completionRejectedAt:Date, completionRejectionReason:String }, {timestamps:true});
 const WorkerReportSchema = new mongoose.Schema({ siteName:String, phoneNo:String, startingDate:String, workerName:String, totalArea:String, workingCost:String, extraWork:String, extraMaterial:String, totalWorkingArea:String, totalAmount:String, note:String, paymentMode:String, upiId:String, bankName:String, bankBranch:String, bankAccount:String, amountReceivedBy:String, materialSupply:String, materialType:String, signatures:{supervisor:Boolean,office:Boolean,admin:Boolean}, addedBy:String }, {timestamps:true});
 const DailyReportSchema = new mongoose.Schema({ date:String, entrySection:{type:String,enum:['site','workers','expenses','office']}, siteName:String, siteId:String, siteStatus:String, workersCount:String, totalArea:String, completedToday:String, totalCompleted:String, interlockType:String, dayNotes:String, materialsUnloaded:String, materialQty:String, equipment:String, supplierName:String, materialRemarks:String, extraWorkDesc:String, extraWorkQty:String, extraWorkCost:String, extraWorkRemarks:String, workerEntries:[{workerName:String,attendance:String,dutyArea:String,workDone:String,salary:Number,amountEarned:Number,paymentGiven:Number,pending:Number,remarks:String,workCategory:String,workArea:Number,unit:String,rate:Number,loadingCharge:Number,unloadingCharge:Number,paymentMode:String}], payments:Array, totalPayments:Number, totalReceived:Number, complaints:String, actionTaken:String, complaintRemarks:String, addedBy:String, newSite:String, runningSite:String, workersDetail:String, materialSupply:String, dayNote:String, expenses:String, workerPayments:[{workerName:String,amount:Number,date:String,note:String}] }, {timestamps:true});
 const WorkPlanSchema = new mongoose.Schema({ date:String, siteName:String, task:String, workers:String, materials:String, note:String, status:{type:String,default:'planned'}, fromDate:String, toDate:String, site:String, plannedWork:String, supervisor:String, workersAllocated:String, materialsNeeded:String, estimatedCost:Number, paymentPlan:String, notes:String, archived:{type:Boolean,default:false}, addedBy:String }, {timestamps:true});
@@ -1702,10 +1702,81 @@ app.post('/api/sitework', async(req,res)=>{
 app.put('/api/sitework/:id', async(req,res)=>{
   const body = { ...req.body };
   delete body.advancePaid;
+  const current = await SiteWork.findById(req.params.id);
+  if (!current) return res.status(404).json({ message: 'Site not found' });
+  if (body.status === 'completed' && current.status !== 'completed') {
+    return res.status(400).json({ message: 'Submit the site through Completed Works for User and Admin approval' });
+  }
   const workerValidation = await validateSiteWorkAssignedWorkers(body);
   if (workerValidation) return res.status(400).json({ message: workerValidation });
   const site = await SiteWork.findByIdAndUpdate(req.params.id,body,{new:true});
   res.json(await recalcSiteFinancials(site));
+});
+app.post('/api/sitework/:id/completion/submit', async(req,res)=>{
+  try {
+    if (req.body.role !== 'supervisor') return res.status(403).json({ message:'Only a supervisor can submit site completion' });
+    const site = await SiteWork.findById(req.params.id);
+    if (!site) return res.status(404).json({ message:'Site not found' });
+    if (site.status === 'completed') return res.status(400).json({ message:'Site is already finally approved and completed' });
+    if (site.addedBy && req.body.name && site.addedBy !== req.body.name) return res.status(403).json({ message:'You can submit only your own sites' });
+    site.status = 'running';
+    site.endDate = '';
+    site.completionApprovalStatus = 'pending_user';
+    site.completionSubmittedBy = req.body.name || site.addedBy || '';
+    site.completionSubmittedAt = new Date();
+    site.userApprovedBy = '';
+    site.userApprovedAt = null;
+    site.adminApprovedBy = '';
+    site.adminApprovedAt = null;
+    site.completionRejectedBy = '';
+    site.completionRejectedRole = '';
+    site.completionRejectedAt = null;
+    site.completionRejectionReason = '';
+    await site.save();
+    res.json(await recalcSiteFinancials(site));
+  } catch(e) { res.status(400).json({ message:e.message }); }
+});
+app.post('/api/sitework/:id/completion/review', async(req,res)=>{
+  try {
+    const { role, name, action } = req.body;
+    if (!['user','admin'].includes(role)) return res.status(403).json({ message:'Only User or Admin can review completion' });
+    if (!['approve','reject'].includes(action)) return res.status(400).json({ message:'Approve or reject action is required' });
+    const site = await SiteWork.findById(req.params.id);
+    if (!site) return res.status(404).json({ message:'Site not found' });
+
+    if (action === 'reject') {
+      const canReject = (role === 'user' && site.completionApprovalStatus === 'pending_user')
+        || (role === 'admin' && ['pending_user','pending_admin'].includes(site.completionApprovalStatus));
+      if (!canReject) return res.status(400).json({ message:'This completion is not awaiting your review' });
+      const reason = String(req.body.reason || '').trim();
+      if (!reason) return res.status(400).json({ message:'Rejection reason is required' });
+      site.status = 'running';
+      site.endDate = '';
+      site.completionApprovalStatus = 'rejected';
+      site.completionRejectedBy = name || '';
+      site.completionRejectedRole = role;
+      site.completionRejectedAt = new Date();
+      site.completionRejectionReason = reason;
+      await site.save();
+      return res.json(await recalcSiteFinancials(site));
+    }
+
+    if (role === 'user') {
+      if (site.completionApprovalStatus !== 'pending_user') return res.status(400).json({ message:'Site is not awaiting User approval' });
+      site.completionApprovalStatus = 'pending_admin';
+      site.userApprovedBy = name || '';
+      site.userApprovedAt = new Date();
+    } else {
+      if (site.completionApprovalStatus !== 'pending_admin' || !site.userApprovedAt) return res.status(400).json({ message:'User approval is required before final Admin approval' });
+      site.completionApprovalStatus = 'approved';
+      site.adminApprovedBy = name || '';
+      site.adminApprovedAt = new Date();
+      site.status = 'completed';
+      site.endDate = req.body.date || new Date().toISOString().slice(0,10);
+    }
+    await site.save();
+    res.json(await recalcSiteFinancials(site));
+  } catch(e) { res.status(400).json({ message:e.message }); }
 });
 app.delete('/api/sitework/:id', async(req,res)=>{await SiteWork.findByIdAndDelete(req.params.id);res.json({ok:true});});
 
