@@ -1578,7 +1578,7 @@ app.post('/api/public/quotations/:token/sign', async(req,res)=>{
     if (!quotation) return res.status(404).json({ message: 'Quotation link is invalid or unavailable' });
     if (quotation.signature?.dataUrl) return res.status(409).json({ message: 'This quotation has already been signed' });
     const dataUrl = String(req.body.signatureData || '');
-    const signedBy = String(req.body.signedBy || quotation.customer || '').trim().slice(0, 120);
+    const signedBy = String(req.body.signedBy || '').trim().slice(0, 120);
     if (!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(dataUrl) || dataUrl.length < 500 || dataUrl.length > 1500000) {
       return res.status(400).json({ message: 'Please provide a valid signature' });
     }
