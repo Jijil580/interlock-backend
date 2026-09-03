@@ -70,7 +70,7 @@ const DriverReportSchema = new mongoose.Schema({
   loadingFrom:String, unloadedLocation:String, loadAmount:Number, cashGivenToSupplier:Number, supplierPendingCash:Number,
   expenses:[{category:String,amount:Number,liters:Number,note:String}],
   vehicleKm:{startKm:Number,endKm:Number,totalKm:Number,note:String},
-  driverChargeType:String, driverCharge:Number, driverWageEarned:Number, driverWagePaid:Number, driverWagePending:Number, driverWageCredit:Number,
+  driverChargeType:String, driverCharge:Number, driverWageEarned:Number, driverWagePaid:Number, driverLegacyPaid:Number, driverWagePending:Number, driverWageCredit:Number,
   payments:[{transactionId:String,amount:Number,cashAmount:Number,advanceAdjusted:Number,date:String,paidAt:Date,mode:String,note:String,addedBy:String}],
   remarks:String, addedBy:String, sourcePurchaseId:String, company:String
 }, {timestamps:true});
@@ -652,13 +652,80 @@ async function applyDriverWage(report) {
     if (existing) chargeEarned = 0;
   }
   const supplierCashPaidByDriver = +(report.cashGivenToSupplier) || 0;
-  const earned = chargeEarned + supplierCashPaidByDriver;
+  const expenseReimbursement = driverExpenseTotal(report);
+  const earned = chargeEarned + supplierCashPaidByDriver + expenseReimbursement;
+  const historyPaid = driverPaymentTotal(report);
+  if (report.driverLegacyPaid == null) {
+    report.driverLegacyPaid = Math.max(0, (+(report.driverWagePaid) || 0) - historyPaid);
+  }
   report.driverWageEarned = earned;
-  report.driverWagePaid = (report.payments || []).reduce((a, p) => a + (+(p.amount) || 0), 0);
+  report.driverWagePaid = (+(report.driverLegacyPaid) || 0) + historyPaid;
   report.driverWagePending = Math.max(0, earned - (+(report.driverWagePaid) || 0));
   report.driverWageCredit = Math.max(0, (+(report.driverWagePaid) || 0) - earned);
   await report.save();
   return report;
+}
+
+function driverExpenseTotal(report) {
+  return (Array.isArray(report?.expenses) ? report.expenses : [])
+    .reduce((sum, expense) => sum + (+(expense.amount) || 0), 0);
+}
+
+function driverPaymentTotal(report) {
+  return (Array.isArray(report?.payments) ? report.payments : [])
+    .reduce((sum, payment) => sum + (+(payment.amount) || 0), 0);
+}
+
+async function syncDriverLedgerHistory() {
+  const reports = await DriverReport.find().sort({ date: 1, createdAt: 1 });
+  const coolieDays = new Set();
+  const updates = [];
+
+  for (const report of reports) {
+    const identity = normalizeMobile(report.driverMobile)
+      || String(report.driverName || '').trim().toLowerCase();
+    const coolieKey = `${identity}|${report.date || ''}`;
+    let chargeEarned = +(report.driverCharge) || 0;
+    if (report.driverChargeType === 'coolie') {
+      if (coolieDays.has(coolieKey)) chargeEarned = 0;
+      else coolieDays.add(coolieKey);
+    }
+
+    const historyPaid = driverPaymentTotal(report);
+    const legacyPaid = report.driverLegacyPaid == null
+      ? Math.max(0, (+(report.driverWagePaid) || 0) - historyPaid)
+      : (+(report.driverLegacyPaid) || 0);
+    const paid = legacyPaid + historyPaid;
+    const earned = chargeEarned
+      + (+(report.cashGivenToSupplier) || 0)
+      + driverExpenseTotal(report);
+    const pending = Math.max(0, earned - paid);
+    const credit = Math.max(0, paid - earned);
+
+    if (
+      +(report.driverWageEarned || 0) !== earned
+      || +(report.driverWagePaid || 0) !== paid
+      || +(report.driverWagePending || 0) !== pending
+      || +(report.driverWageCredit || 0) !== credit
+      || report.driverLegacyPaid == null
+    ) {
+      updates.push({
+        updateOne: {
+          filter: { _id: report._id },
+          update: { $set: {
+            driverWageEarned: earned,
+            driverWagePaid: paid,
+            driverLegacyPaid: legacyPaid,
+            driverWagePending: pending,
+            driverWageCredit: credit,
+          } },
+        },
+      });
+    }
+  }
+
+  if (updates.length) await DriverReport.bulkWrite(updates);
+  return { checked: reports.length, updated: updates.length };
 }
 
 async function syncDriverRawMaterialPurchase(report) {
@@ -715,13 +782,7 @@ async function syncDriverRawMaterialPurchase(report) {
 }
 
 function summarizeDriverReports(reports = []) {
-  const payableForDriverReport = (r) => {
-    const storedEarned = +(r.driverWageEarned) || 0;
-    const supplierCash = +(r.cashGivenToSupplier) || 0;
-    const charge = +(r.driverCharge) || 0;
-    return storedEarned >= (charge + supplierCash) ? storedEarned : storedEarned + supplierCash;
-  };
-  const totalEarned = reports.reduce((a, r) => a + payableForDriverReport(r), 0);
+  const totalEarned = reports.reduce((a, r) => a + (+(r.driverWageEarned) || 0), 0);
   const totalPaid = reports.reduce((a, r) => a + (+(r.driverWagePaid) || 0), 0);
   const totalCredit = Math.max(0, totalPaid - totalEarned);
   const totalLoadAmount = reports.reduce((a, r) => a + (+(r.loadAmount) || 0), 0);
@@ -2623,6 +2684,7 @@ app.post('/api/workerpayments', async(req,res)=>{
 
 app.get('/api/driverreports', async(req,res)=>{
   try {
+    await syncDriverLedgerHistory();
     const { role, name, driver, mobile, date, fromDate, toDate, category } = req.query;
     const filter = {};
     if (role === 'driver' && name) filter.driverName = name;
@@ -2645,6 +2707,7 @@ app.post('/api/driverreports', async(req,res)=>{
     const report = await DriverReport.create(normalizeDriverReport(req.body));
     await applyDriverWage(report);
     await syncDriverRawMaterialPurchase(report);
+    await syncDriverLedgerHistory();
     res.json(await DriverReport.findById(report._id));
   } catch(e) { res.status(400).json({ message: e.message }); }
 });
@@ -2658,6 +2721,7 @@ app.put('/api/driverreports/:id', async(req,res)=>{
     await existing.save();
     await applyDriverWage(existing);
     await syncDriverRawMaterialPurchase(existing);
+    await syncDriverLedgerHistory();
     const updated = await DriverReport.findById(existing._id);
     await createReportAudit({ req, recordType: 'Driver Report', action: 'edit', before, after: updated });
     res.json(updated);
@@ -2677,11 +2741,13 @@ app.delete('/api/driverreports/:id', async(req,res)=>{
       }
     }
     await DriverReport.findByIdAndDelete(req.params.id);
+    await syncDriverLedgerHistory();
     res.json({ ok: true });
   } catch(e) { res.status(e.statusCode || 400).json({ message: e.message }); }
 });
 app.post('/api/driverreports/:id/payment', async(req,res)=>{
   try {
+    await syncDriverLedgerHistory();
     const report = await DriverReport.findById(req.params.id);
     if (!report) return res.status(404).json({ message: 'Driver report not found' });
     const cashAmount = Math.max(0, +(req.body.amount) || 0);
@@ -2712,6 +2778,7 @@ app.post('/api/driverreports/:id/payment', async(req,res)=>{
 
 app.post('/api/driverreports/payment', async(req,res)=>{
   try {
+    await syncDriverLedgerHistory();
     const { driverName, driverMobile, date, mode, note, addedBy } = req.body;
     const cashAmount = Math.max(0, +(req.body.amount) || 0);
     if (!driverName && !driverMobile) return res.status(400).json({ message: 'Driver name or mobile is required' });
@@ -4361,4 +4428,6 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, async()=>{
   console.log(`🚀 Server running on port ${PORT}`);
   await seedData();
+  const driverLedgerSync = await syncDriverLedgerHistory();
+  console.log(`Driver ledger history checked: ${driverLedgerSync.checked}, updated: ${driverLedgerSync.updated}`);
 });
