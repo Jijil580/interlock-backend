@@ -1852,8 +1852,10 @@ app.put('/api/dailyreport/:id', async(req,res)=>{
   try {
     if (!auditReasonOf(req)) return res.status(400).json({ message: 'Reason is required' });
     const oldReport = await DailyReport.findById(req.params.id);
+    if (!oldReport) return res.status(404).json({ message: 'Daily report not found' });
     const body = normalizeDailyReportBody(req.body);
-    const workerValidation = await validateDailyReportSiteWorkers(body);
+    const historicalWorkerNames = (oldReport.workerEntries || []).map(entry => entry.workerName).filter(Boolean);
+    const workerValidation = await validateDailyReportSiteWorkers(body, historicalWorkerNames);
     if (workerValidation) return res.status(400).json({ message: workerValidation });
     const newReport = await DailyReport.findByIdAndUpdate(req.params.id,body,{new:true});
     const workersToSync = new Set();
@@ -2007,13 +2009,17 @@ async function findDuplicateWorkerEntry(report, excludeId) {
   ) || null;
 }
 
-async function validateDailyReportSiteWorkers(report) {
+async function validateDailyReportSiteWorkers(report, historicalWorkerNames = []) {
   const entries = (report.workerEntries || []).filter(we => we.workerName);
   if (!entries.length) return null;
   const site = report.siteId ? await SiteWork.findById(report.siteId).lean() : await SiteWork.findOne({ customerName: report.siteName }).lean();
   if (!site) return null;
   const assigned = new Set((site.selectedWorkers || []).map(name => normKey(name)));
+  const historical = new Set(historicalWorkerNames.map(name => normKey(name)));
   for (const entry of entries) {
+    // Keep historical rows editable when the current site assignment changes.
+    // A newly introduced worker must still satisfy the current assignment rules.
+    if (historical.has(normKey(entry.workerName))) continue;
     if (!assigned.has(normKey(entry.workerName))) return `${entry.workerName} is not assigned to this site.`;
     const worker = await Worker.findOne({ name: entry.workerName }).lean();
     if (!worker || normalizeWorkerType(worker) !== 'Site Worker' || !isWorkerActive(worker)) {
