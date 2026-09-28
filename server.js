@@ -1322,9 +1322,10 @@ app.delete('/api/sales/:id', async(req,res)=>{
 });
 
 function loadingProductDetails(sale) {
+  const sqftPerPiece = +(sale.sqftPerPiece) || 0;
   return {
     product:sale.product || sale.interlockDetails || sale.category || 'Other',
-    productType:sale.productType || 'other',
+    productType:sale.productType || (sqftPerPiece > 0 ? 'interlock' : 'other'),
     itemId:String(sale.itemId || ''),
     category:sale.category || '',
     shape:sale.shape || '',
@@ -1332,8 +1333,12 @@ function loadingProductDetails(sale) {
     size:sale.size || '',
     thickness:sale.thickness || '',
     unit:sale.unit || 'piece',
-    sqftPerPiece:+(sale.sqftPerPiece) || 0,
+    sqftPerPiece,
   };
+}
+
+function loadingSaleQuantity(sale) {
+  return +(sale?.quantity ?? sale?.qty ?? sale?.count ?? sale?.pieces ?? 0) || 0;
 }
 
 async function normalizeLoadingOperation(body = {}, excludeId = null) {
@@ -1369,7 +1374,7 @@ async function normalizeLoadingOperation(body = {}, excludeId = null) {
   const loadedAtSite = operations.filter(row => row.operation === 'load' && row.siteId === String(site._id)).reduce((sum,row) => sum + (+(row.quantity) || 0), 0);
   const unloadedAtSite = operations.filter(row => row.operation === 'unload' && row.siteId === String(site._id)).reduce((sum,row) => sum + (+(row.quantity) || 0), 0);
   const available = operation === 'load'
-    ? Math.max(0, (+(sale.quantity) || 0) - loaded)
+    ? Math.max(0, loadingSaleQuantity(sale) - loaded)
     : Math.max(0, loadedAtSite - unloadedAtSite);
   if (quantity > available) {
     const error = new Error(`Only ${available} ${sale.unit || 'piece'} available to ${operation}`);
@@ -1406,7 +1411,7 @@ async function normalizeLoadingOperation(body = {}, excludeId = null) {
 app.get('/api/loading-operations/availability', async(req,res)=>{
   try {
     const [sales, operations] = await Promise.all([
-      Sales.find({ quantity:{ $gt:0 } }).sort({ date:-1, createdAt:-1 }).lean(),
+      Sales.find().sort({ date:-1, createdAt:-1 }).lean(),
       LoadingOperation.find().sort({ date:-1, time:-1, createdAt:-1 }).lean(),
     ]);
     const bySale = new Map();
@@ -1414,7 +1419,7 @@ app.get('/api/loading-operations/availability', async(req,res)=>{
       if (!bySale.has(row.saleId)) bySale.set(row.saleId, []);
       bySale.get(row.saleId).push(row);
     });
-    const rows = sales.map(sale => {
+    const rows = sales.filter(sale => loadingSaleQuantity(sale) > 0).map(sale => {
       const saleOperations = bySale.get(String(sale._id)) || [];
       const loaded = saleOperations.filter(row => row.operation === 'load').reduce((sum,row) => sum + (+(row.quantity) || 0), 0);
       const unloaded = saleOperations.filter(row => row.operation === 'unload').reduce((sum,row) => sum + (+(row.quantity) || 0), 0);
@@ -1428,8 +1433,8 @@ app.get('/api/loading-operations/availability', async(req,res)=>{
       return {
         saleId:String(sale._id), invoiceNumber:sale.invoiceNumber, date:sale.date,
         customerName:sale.customer, ...loadingProductDetails(sale),
-        sold:+(sale.quantity) || 0, loaded, unloaded,
-        availableToLoad:Math.max(0, (+(sale.quantity) || 0) - loaded),
+        sold:loadingSaleQuantity(sale), loaded, unloaded,
+        availableToLoad:Math.max(0, loadingSaleQuantity(sale) - loaded),
         availableToUnload:Math.max(0, loaded - unloaded),
         siteBalances:Object.values(siteMap),
       };
