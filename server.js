@@ -1717,6 +1717,50 @@ app.put('/api/sitework/:id', async(req,res)=>{
   const site = await SiteWork.findByIdAndUpdate(req.params.id,body,{new:true});
   res.json(await recalcSiteFinancials(site));
 });
+app.put('/api/sitework/:id/payments/:index', async(req,res)=>{
+  try {
+    const site = await SiteWork.findById(req.params.id);
+    if (!site) return res.status(404).json({ message:'Site not found' });
+    const index = Number(req.params.index);
+    if (!Number.isInteger(index) || index < 0 || index >= (site.payments || []).length) {
+      return res.status(404).json({ message:'Site payment not found' });
+    }
+    const amount = +(req.body.amount);
+    if (!Number.isFinite(amount) || amount < 0) return res.status(400).json({ message:'Enter a valid payment amount' });
+    const before = { ...site.payments[index], siteId:String(site._id), siteName:site.customerName };
+    site.payments[index] = {
+      ...site.payments[index],
+      date:String(req.body.date || site.payments[index]?.date || site.startDate || '').slice(0,10),
+      amount,
+      mode:req.body.mode || req.body.paymentMode || site.payments[index]?.mode || 'Cash',
+      remarks:req.body.remarks ?? site.payments[index]?.remarks ?? '',
+    };
+    site.legacyReceived = 0;
+    site.markModified('payments');
+    await site.save();
+    const updated = await recalcSiteFinancials(site);
+    await createReportAudit({ req, recordType:'Site Work Payment', action:'edit', before, after:{ ...site.payments[index], siteId:String(site._id), siteName:site.customerName } });
+    res.json(updated);
+  } catch(e) { res.status(e.statusCode || 400).json({ message:e.message }); }
+});
+app.delete('/api/sitework/:id/payments/:index', async(req,res)=>{
+  try {
+    const site = await SiteWork.findById(req.params.id);
+    if (!site) return res.status(404).json({ message:'Site not found' });
+    const index = Number(req.params.index);
+    if (!Number.isInteger(index) || index < 0 || index >= (site.payments || []).length) {
+      return res.status(404).json({ message:'Site payment not found' });
+    }
+    const before = { ...site.payments[index], siteId:String(site._id), siteName:site.customerName };
+    site.payments.splice(index, 1);
+    site.legacyReceived = 0;
+    site.markModified('payments');
+    await site.save();
+    const updated = await recalcSiteFinancials(site);
+    await createReportAudit({ req, recordType:'Site Work Payment', action:'delete', before });
+    res.json(updated);
+  } catch(e) { res.status(e.statusCode || 400).json({ message:e.message }); }
+});
 app.post('/api/sitework/:id/completion/submit', async(req,res)=>{
   try {
     if (req.body.role !== 'supervisor') return res.status(403).json({ message:'Only a supervisor can submit site completion' });
