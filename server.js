@@ -3954,13 +3954,20 @@ app.get('/api/dashboard-summary', async(req,res)=>{
       if (toDate) dateFilter.date.$lte = toDate;
     }
 
-    const [sales, purchases, productionEntries, sites, dailyReports, stock] = await Promise.all([
+    const [sales, purchases, productionEntries, sites, dailyReports, stock, workerPayments, companyPurchases, driverReports, salaryRecords, salaryAdvances, loadingOperations, siteCashTransactions] = await Promise.all([
       Sales.find(dateFilter).sort({ createdAt: -1 }).lean(),
       Purchase.find(dateFilter).sort({ createdAt: -1 }).lean(),
       ProductionSiteEntry.find({ ...dateFilter, producedQty: { $exists: true, $gt: 0 } }).sort({ createdAt: -1 }).lean(),
       SiteWork.find().sort({ createdAt: -1 }).lean(),
       DailyReport.find(dateFilter).sort({ createdAt: -1 }).lean(),
       Stock.find().lean(),
+      WorkerPayment.find({ ...dateFilter, source:{ $nin:['production','daily-report','supervisor_report'] } }).lean(),
+      CompanyPurchase.find(dateFilter).lean(),
+      DriverReport.find(dateFilter).lean(),
+      SalaryRecord.find().lean(),
+      SalaryAdvance.find(dateFilter).lean(),
+      LoadingOperation.find(dateFilter).lean(),
+      CashTransaction.find({ ...dateFilter, partyType:'site', direction:'receive' }).lean(),
     ]);
 
     const sitePayments = sites.reduce((sum, site) => {
@@ -3993,6 +4000,27 @@ app.get('/api/dashboard-summary', async(req,res)=>{
       productionItemMap[key].amount += +(entry.totalAmount) || 0;
     });
 
+    const dailyWorkerPaid = dailyReports.reduce((sum, report) => sum + (report.workerEntries || []).reduce((inner, worker) => inner + (+(worker.paymentGiven) || 0), 0), 0);
+    const dailyOtherExpenses = dailyReports.reduce((sum, report) => sum + (report.payments || []).reduce((inner, payment) => {
+      const kind = paymentKind(payment.type);
+      if (['site payment received','client payment received','worker payment','cash received from office','cash given to office'].includes(kind)) return inner;
+      return inner + (+(payment.amount) || 0);
+    }, 0), 0);
+    const directWorkerPaid = workerPayments.reduce((sum, payment) => sum + (+(payment.cashAmount ?? payment.amount) || 0), 0);
+    const driverSalaryPaid = driverReports.reduce((sum, report) => sum + (report.payments || []).reduce((inner, payment) =>
+      inner + (inDateRange(payment.date || report.date, fromDate, toDate) ? (+(payment.cashAmount ?? payment.amount) || 0) : 0), 0), 0);
+    const driverExpensesPaid = driverReports.reduce((sum, report) => sum + (report.expenses || []).reduce((inner, expense) => inner + (+(expense.amount) || 0), 0), 0);
+    const monthlySalaryPaid = salaryRecords.reduce((sum, record) => sum + (record.payments || []).reduce((inner, payment) =>
+      inner + (inDateRange(payment.date, fromDate, toDate) ? (+(payment.cashAmount ?? payment.amount) || 0) : 0), 0), 0);
+    const salaryAdvancePaid = salaryAdvances.reduce((sum, advance) => sum + (+(advance.amount) || 0), 0);
+    const companyPurchasePaid = companyPurchases.reduce((sum, purchase) => sum + (+(purchase.amount) || 0), 0);
+    const loadingWorkerPaid = loadingOperations.reduce((sum, operation) => sum + (+(operation.paymentGiven) || 0), 0);
+    const siteCashReceived = siteCashTransactions.reduce((sum, transaction) => sum + (+(transaction.amount) || 0), 0);
+    const productionWorkerPaid = productionEntries.reduce((sum, entry) => sum + (+(entry.paymentGiven) || 0), 0);
+    const payrollPaid = productionWorkerPaid + dailyWorkerPaid + directWorkerPaid + driverSalaryPaid + monthlySalaryPaid + salaryAdvancePaid + loadingWorkerPaid;
+    const purchaseCashOut = purchases.reduce((sum, purchase) => sum + (+(purchase.amountPaid) || 0), 0) + companyPurchasePaid;
+    const otherExpensePaid = dailyOtherExpenses + driverExpensesPaid;
+
     const totals = {
       salesCount: sales.length,
       salesAmount: sales.reduce((sum, sale) => sum + (+(sale.total) || 0), 0),
@@ -4006,19 +4034,31 @@ app.get('/api/dashboard-summary', async(req,res)=>{
       productionQuantity: productionEntries.reduce((sum, entry) => sum + (+(entry.producedQty) || 0), 0),
       productionSqft: productionEntries.reduce((sum, entry) => sum + (+(entry.sqftQty || 0) || ((+(entry.producedQty) || 0) * (+(entry.sqftPerPiece) || 0))), 0),
       productionValue: productionEntries.reduce((sum, entry) => sum + (+(entry.totalAmount) || 0), 0),
-      productionPaid: productionEntries.reduce((sum, entry) => sum + (+(entry.paymentGiven) || 0), 0),
+      productionPaid: productionWorkerPaid,
       productionPending: productionEntries.reduce((sum, entry) => sum + (+(entry.amountPending ?? ((+(entry.totalAmount) || 0) - (+(entry.paymentGiven) || 0))) || 0), 0),
       runningSites: sites.filter(site => site.status === 'running' || site.status === 'pending').length,
       completedSites: sites.filter(site => site.status === 'completed').length,
       siteValue: sites.reduce((sum, site) => sum + (+(site.totalCost || site.totalAmount) || 0), 0),
-      siteReceived: sitePayments + dailySitePayments,
+      siteReceived: sitePayments + dailySitePayments + siteCashReceived,
       sitePending: sites.reduce((sum, site) => sum + (+(site.pendingAmount) || 0), 0),
       stockItems: stock.length,
       stockQuantity: stock.reduce((sum, item) => sum + (+(item.quantity) || 0), 0),
       lowStockItems: stock.filter(item => (+(item.minStock) || 0) > 0 && (+(item.quantity) || 0) <= (+(item.minStock) || 0)).length,
+      payrollPaid,
+      purchaseCashOut,
+      otherExpensePaid,
+      companyPurchasePaid,
+      dailyWorkerPaid,
+      directWorkerPaid,
+      driverSalaryPaid,
+      driverExpensesPaid,
+      monthlySalaryPaid,
+      salaryAdvancePaid,
+      loadingWorkerPaid,
+      siteCashReceived,
     };
     totals.cashIn = totals.salesReceived + totals.siteReceived;
-    totals.cashOut = totals.purchasePaid + totals.productionPaid;
+    totals.cashOut = purchaseCashOut + payrollPaid + otherExpensePaid;
     totals.netCash = totals.cashIn - totals.cashOut;
 
     res.json({
