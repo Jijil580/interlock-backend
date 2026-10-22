@@ -35,6 +35,8 @@ const CustomerSchema = new mongoose.Schema({ mobile:{type:String,unique:true}, n
 const SiteWorkSchema = new mongoose.Schema({ customerName:String, phone:String, siteLocation:String, location:String, interlockItemId:String, interlockType:String, interlockColor:String, selectedWorkers:[String], startDate:String, endDate:String, status:{type:String,default:'running'}, workUnit:String, workSize:String, ratePerUnit:String, baseWorkCost:String, extraWork:Array, extraMaterials:Array, materialCost:String, laborCost:String, totalCost:String, payments:Array, legacyReceived:Number, totalReceived:Number, pendingAmount:String, paymentStatus:{type:String,default:'pending'}, paymentMode:String, note:String, addedBy:String, workStatus:String, totalAmount:Number, paidAmount:Number, company:String, completionApprovalStatus:String, completionSubmittedBy:String, completionSubmittedAt:Date, userApprovedBy:String, userApprovedAt:Date, adminApprovedBy:String, adminApprovedAt:Date, completionRejectedBy:String, completionRejectedRole:String, completionRejectedAt:Date, completionRejectionReason:String }, {timestamps:true});
 const WorkerReportSchema = new mongoose.Schema({ siteName:String, phoneNo:String, startingDate:String, workerName:String, totalArea:String, workingCost:String, extraWork:String, extraMaterial:String, totalWorkingArea:String, totalAmount:String, note:String, paymentMode:String, upiId:String, bankName:String, bankBranch:String, bankAccount:String, amountReceivedBy:String, materialSupply:String, materialType:String, signatures:{supervisor:Boolean,office:Boolean,admin:Boolean}, addedBy:String }, {timestamps:true});
 const DailyReportSchema = new mongoose.Schema({ date:String, entrySection:{type:String,enum:['site','workers','expenses','office']}, siteName:String, siteId:String, siteStatus:String, workersCount:String, totalArea:String, completedToday:String, totalCompleted:String, interlockType:String, dayNotes:String, materialsUnloaded:String, materialQty:String, equipment:String, supplierName:String, materialRemarks:String, extraWorkDesc:String, extraWorkQty:String, extraWorkCost:String, extraWorkRemarks:String, workerEntries:[{workerName:String,attendance:String,dutyArea:String,workDone:String,salary:Number,amountEarned:Number,paymentGiven:Number,pending:Number,remarks:String,workCategory:String,workArea:Number,unit:String,rate:Number,loadingCharge:Number,unloadingCharge:Number,paymentMode:String}], payments:Array, totalPayments:Number, totalReceived:Number, complaints:String, actionTaken:String, complaintRemarks:String, addedBy:String, newSite:String, runningSite:String, workersDetail:String, materialSupply:String, dayNote:String, expenses:String, workerPayments:[{workerName:String,amount:Number,date:String,note:String}] }, {timestamps:true});
+DailyReportSchema.index({ siteId:1, date:-1 });
+DailyReportSchema.index({ siteName:1, date:-1 });
 const WorkPlanSchema = new mongoose.Schema({ date:String, siteName:String, task:String, workers:String, materials:String, note:String, status:{type:String,default:'planned'}, fromDate:String, toDate:String, site:String, plannedWork:String, supervisor:String, workersAllocated:String, materialsNeeded:String, estimatedCost:Number, paymentPlan:String, notes:String, archived:{type:Boolean,default:false}, addedBy:String }, {timestamps:true});
 const WorkerSchema = new mongoose.Schema({ name:String, phone:String, address:String, role:String, workerType:String, workerCategory:String, status:{type:String,default:'Active'}, workLocationType:String, paymentType:String, customPaymentType:String, rateType:String, rateAmount:Number, totalProduction:{type:Number,default:0}, totalEarnings:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
 const WorkerPaymentSchema = new mongoose.Schema({ workerId:String, workerName:String, personType:String, amount:Number, cashAmount:Number, advanceAdjusted:Number, date:String, paidAt:Date, mode:String, note:String, addedBy:String, source:String, reportDate:String, paymentScope:String, weekStart:String, weekEnd:String }, {timestamps:true});
@@ -60,6 +62,8 @@ const CashTransactionSchema = new mongoose.Schema({
   addedByRole:String,
 }, {timestamps:true});
 CashTransactionSchema.index({ partyType:1, partyName:1, date:-1 });
+CashTransactionSchema.index({ partyType:1, direction:1, partyId:1, date:-1 });
+CashTransactionSchema.index({ partyType:1, direction:1, partyName:1, date:-1 });
 CashTransactionSchema.index({ addedBy:1, date:-1 });
 const SupplierSchema = new mongoose.Schema({ name:String, mobile:String, phone:String, address:String, location:String, materialType:String, materials:[String], customMaterial:String, gstNumber:String, notes:String, note:String, totalPurchases:{type:Number,default:0}, totalPurchaseAmount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
 const MasterDataSchema = new mongoose.Schema({ name:String, category:String, shape:String, color:String, size:String, thickness:String, sqftPerPiece:Number, boxCount:Number, pricePerSqft:Number, pricePerSqm:Number, unit:String, price:Number, stock:Number, rate:Number, rateType:String, description:String, notes:String, addedBy:String }, {timestamps:true});
@@ -1684,17 +1688,10 @@ app.get('/api/customers/reports', async(req,res)=>{
 });
 
 app.get('/api/sitework', async(req,res)=>{
-  const sites = await SiteWork.find().sort({createdAt:-1});
-  const response = [];
-  for (const site of sites) {
-    await recalcSiteFinancials(site);
-    const [cashTransactionPayments, dispatchOperations] = await Promise.all([
-      getCashTransactionSitePaymentRows(site),
-      LoadingOperation.find({ siteId:String(site._id) }).sort({ date:-1, time:-1, createdAt:-1 }).lean(),
-    ]);
-    response.push({ ...site.toObject(), cashTransactionPayments, dispatchOperations });
-  }
-  res.json(response);
+  try {
+    const sites = await SiteWork.find().sort({createdAt:-1}).lean();
+    res.json(await buildSiteWorkReadResponse(sites));
+  } catch(e) { res.status(500).json({ message:e.message }); }
 });
 app.post('/api/sitework', async(req,res)=>{
   const body = { ...req.body };
@@ -3542,6 +3539,78 @@ async function getCashTransactionSitePaymentRows(site) {
     remarks:record.note || '',
     receivedBy:record.addedBy || '',
     source:'Cash Transactions',
+  }));
+}
+
+async function buildSiteWorkReadResponse(sites) {
+  if (!sites.length) return [];
+  const siteIds = sites.map(site=>String(site._id));
+  const siteNames = [...new Set(sites.map(site=>site.customerName).filter(Boolean))];
+  const sitesById = new Map(sites.map(site=>[String(site._id),site]));
+  const sitesByName = new Map();
+  for (const site of sites) {
+    const rows = sitesByName.get(site.customerName) || [];
+    rows.push(site);
+    sitesByName.set(site.customerName,rows);
+  }
+  const [reports, cashRecords, operations] = await Promise.all([
+    DailyReport.find({ $or:[{siteId:{$in:siteIds}},{siteName:{$in:siteNames}}] }).select('siteId siteName payments').lean(),
+    CashTransaction.find({
+      partyType:'site', direction:'receive',
+      $or:[{partyId:{$in:siteIds}},{partyName:{$in:siteNames},partyId:{$in:['',null]}}],
+    }).select('partyId partyName date time amount paymentMode note addedBy createdAt').sort({date:-1,time:-1,createdAt:-1}).lean(),
+    LoadingOperation.find({siteId:{$in:siteIds}}).sort({date:-1,time:-1,createdAt:-1}).lean(),
+  ]);
+
+  const dailyBySite = new Map(siteIds.map(id=>[id,0]));
+  for (const report of reports) {
+    const matches = new Set();
+    if (report.siteId && sitesById.has(String(report.siteId))) matches.add(String(report.siteId));
+    for (const site of sitesByName.get(report.siteName) || []) matches.add(String(site._id));
+    const amount = (report.payments || []).reduce((sum,payment)=>{
+      const kind = paymentKind(payment.type);
+      return sum + (kind==='site payment received' || kind==='client payment received' ? (+(payment.amount)||0) : 0);
+    },0);
+    for (const id of matches) dailyBySite.set(id,(dailyBySite.get(id)||0)+amount);
+  }
+
+  const cashBySite = new Map(siteIds.map(id=>[id,[]]));
+  for (const record of cashRecords) {
+    const matches = new Set();
+    if (record.partyId && sitesById.has(String(record.partyId))) matches.add(String(record.partyId));
+    if (!record.partyId) {
+      for (const site of sitesByName.get(record.partyName) || []) matches.add(String(site._id));
+    }
+    const row = {
+      transactionId:String(record._id), date:record.date,
+      time:record.time || record.createdAt?.toISOString?.().slice(11,16) || '',
+      amount:+(record.amount)||0, mode:record.paymentMode||'Cash', remarks:record.note||'',
+      receivedBy:record.addedBy||'', source:'Cash Transactions',
+    };
+    for (const id of matches) cashBySite.get(id)?.push(row);
+  }
+
+  const operationsBySite = new Map(siteIds.map(id=>[id,[]]));
+  for (const operation of operations) operationsBySite.get(String(operation.siteId))?.push(operation);
+
+  return Promise.all(sites.map(async site=>{
+    const id = String(site._id);
+    const dailyPayments = dailyBySite.get(id)||0;
+    const siteCashRows = cashBySite.get(id)||[];
+    const cashPayments = siteCashRows.reduce((sum,row)=>sum+(+(row.amount)||0),0);
+    const legacyReceived = await getLegacySiteWorkPayment(site,dailyPayments,cashPayments);
+    const totalReceived = siteWorkPaymentsOf(site) + legacyReceived + dailyPayments + cashPayments;
+    const siteCost = siteCostOf(site);
+    const pendingAmount = Math.max(0,siteCost-totalReceived);
+    return {
+      ...site,
+      totalReceived,
+      paidAmount:totalReceived,
+      pendingAmount:String(pendingAmount),
+      paymentStatus:pendingAmount===0 && siteCost>0 ? 'paid' : totalReceived>0 ? 'partial' : 'pending',
+      cashTransactionPayments:siteCashRows,
+      dispatchOperations:operationsBySite.get(id)||[],
+    };
   }));
 }
 
