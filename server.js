@@ -43,9 +43,12 @@ const WorkPlanSchema = new mongoose.Schema({ date:String, siteName:String, task:
 const WorkerSchema = new mongoose.Schema({ name:String, phone:String, address:String, role:String, workerType:String, workerCategory:String, status:{type:String,default:'Active'}, workLocationType:String, paymentType:String, customPaymentType:String, rateType:String, rateAmount:Number, totalProduction:{type:Number,default:0}, totalEarnings:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
 const WorkerPaymentSchema = new mongoose.Schema({ workerId:String, workerName:String, personType:String, amount:Number, cashAmount:Number, advanceAdjusted:Number, date:String, paidAt:Date, mode:String, note:String, addedBy:String, source:String, reportDate:String, paymentScope:String, weekStart:String, weekEnd:String }, {timestamps:true});
 WorkerPaymentSchema.index({ source:1, workerName:1 });
+WorkerPaymentSchema.index({ date:-1, source:1 });
 const PurchaseSchema = new mongoose.Schema({ date:String, supplierName:String, supplierPhone:String, supplierMobile:String, supplierAddress:String, itemName:String, itemType:String, quantity:String, unit:String, unitPrice:String, totalAmount:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, vehicleNumber:String, vehicleType:String, driverName:String, driverPhone:String, deliveryAddress:String, note:String, addedBy:String, source:String, sourceId:String }, {timestamps:true});
 const CompanyPurchaseSchema = new mongoose.Schema({ date:String, materialName:String, quantity:Number, unit:String, amount:Number, paymentMode:String, accountName:String, note:String, purchasedBy:String, purchasedByRole:String }, {timestamps:true});
+CompanyPurchaseSchema.index({ date:-1, createdAt:-1 });
 const SupervisorCashReceiptSchema = new mongoose.Schema({ date:String, supervisorName:String, amount:Number, paymentMode:String, receivedBy:String, receivedByRole:String, note:String }, {timestamps:true});
+SupervisorCashReceiptSchema.index({ date:-1, createdAt:-1 });
 const AdminCashTransferSchema = new mongoose.Schema({ date:String, direction:String, adminName:String, officeName:String, amount:Number, paymentMode:String, note:String, addedBy:String, addedByRole:String }, {timestamps:true});
 const CashTransactionSchema = new mongoose.Schema({
   date:String,
@@ -68,6 +71,7 @@ CashTransactionSchema.index({ partyType:1, partyName:1, date:-1 });
 CashTransactionSchema.index({ partyType:1, direction:1, partyId:1, date:-1 });
 CashTransactionSchema.index({ partyType:1, direction:1, partyName:1, date:-1 });
 CashTransactionSchema.index({ addedBy:1, date:-1 });
+CashTransactionSchema.index({ partyType:1, direction:1, date:-1 });
 const SupplierSchema = new mongoose.Schema({ name:String, mobile:String, phone:String, address:String, location:String, materialType:String, materials:[String], customMaterial:String, gstNumber:String, notes:String, note:String, totalPurchases:{type:Number,default:0}, totalPurchaseAmount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
 const MasterDataSchema = new mongoose.Schema({ name:String, category:String, shape:String, color:String, size:String, thickness:String, sqftPerPiece:Number, boxCount:Number, pricePerSqft:Number, pricePerSqm:Number, unit:String, price:Number, stock:Number, rate:Number, rateType:String, description:String, notes:String, addedBy:String }, {timestamps:true});
 const DriverReportSchema = new mongoose.Schema({
@@ -101,6 +105,7 @@ const SalaryAdvanceSchema = new mongoose.Schema({
   date:String, mode:String, note:String, givenBy:String,
   adjustments:[{amount:Number,date:String,adjustedBy:String,referenceType:String,referenceId:String}],
 }, {timestamps:true});
+SalaryAdvanceSchema.index({ date:-1 });
 const AttendanceRegisterSchema = new mongoose.Schema({
   date:{ type:String, required:true, unique:true },
   entries:[{
@@ -149,6 +154,7 @@ LoadingOperationSchema.index({ saleId:1, operation:1, date:-1 });
 LoadingOperationSchema.index({ siteId:1, date:-1 });
 LoadingOperationSchema.index({ workerName:1, date:-1 });
 LoadingOperationSchema.index({ workerType:1, workerName:1, date:-1 });
+LoadingOperationSchema.index({ date:-1, createdAt:-1 });
 const ProductionSiteSchema = new mongoose.Schema({
   date:String, shift:String, workerId:String, workerName:String,
   itemId:String, itemName:String, category:String, shape:String, color:String, size:String, thickness:String, unitType:String,
