@@ -847,7 +847,7 @@ const Settings = mongoose.model('Settings', SettingsSchema);
 const DEFAULT_BRANDING = {
   key: 'branding',
   companyName: 'P. K. INTERLOCKS & HOLLOW BRICKS',
-  shortName: 'PK Interlock',
+  shortName: process.env.COMPANY_SHORT_NAME || 'PK Interlock',
   logo: '🏭',
   address: 'HAJ ROAD, VILAKKODE, IRITTY',
   state: 'Kerala',
