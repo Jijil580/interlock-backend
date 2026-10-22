@@ -37,9 +37,11 @@ const WorkerReportSchema = new mongoose.Schema({ siteName:String, phoneNo:String
 const DailyReportSchema = new mongoose.Schema({ date:String, entrySection:{type:String,enum:['site','workers','expenses','office']}, siteName:String, siteId:String, siteStatus:String, workersCount:String, totalArea:String, completedToday:String, totalCompleted:String, interlockType:String, dayNotes:String, materialsUnloaded:String, materialQty:String, equipment:String, supplierName:String, materialRemarks:String, extraWorkDesc:String, extraWorkQty:String, extraWorkCost:String, extraWorkRemarks:String, workerEntries:[{workerName:String,attendance:String,dutyArea:String,workDone:String,salary:Number,amountEarned:Number,paymentGiven:Number,pending:Number,remarks:String,workCategory:String,workArea:Number,unit:String,rate:Number,loadingCharge:Number,unloadingCharge:Number,paymentMode:String}], payments:Array, totalPayments:Number, totalReceived:Number, complaints:String, actionTaken:String, complaintRemarks:String, addedBy:String, newSite:String, runningSite:String, workersDetail:String, materialSupply:String, dayNote:String, expenses:String, workerPayments:[{workerName:String,amount:Number,date:String,note:String}] }, {timestamps:true});
 DailyReportSchema.index({ siteId:1, date:-1 });
 DailyReportSchema.index({ siteName:1, date:-1 });
+DailyReportSchema.index({ 'workerEntries.workerName':1, date:-1 });
 const WorkPlanSchema = new mongoose.Schema({ date:String, siteName:String, task:String, workers:String, materials:String, note:String, status:{type:String,default:'planned'}, fromDate:String, toDate:String, site:String, plannedWork:String, supervisor:String, workersAllocated:String, materialsNeeded:String, estimatedCost:Number, paymentPlan:String, notes:String, archived:{type:Boolean,default:false}, addedBy:String }, {timestamps:true});
 const WorkerSchema = new mongoose.Schema({ name:String, phone:String, address:String, role:String, workerType:String, workerCategory:String, status:{type:String,default:'Active'}, workLocationType:String, paymentType:String, customPaymentType:String, rateType:String, rateAmount:Number, totalProduction:{type:Number,default:0}, totalEarnings:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
 const WorkerPaymentSchema = new mongoose.Schema({ workerId:String, workerName:String, personType:String, amount:Number, cashAmount:Number, advanceAdjusted:Number, date:String, paidAt:Date, mode:String, note:String, addedBy:String, source:String, reportDate:String, paymentScope:String, weekStart:String, weekEnd:String }, {timestamps:true});
+WorkerPaymentSchema.index({ source:1, workerName:1 });
 const PurchaseSchema = new mongoose.Schema({ date:String, supplierName:String, supplierPhone:String, supplierMobile:String, supplierAddress:String, itemName:String, itemType:String, quantity:String, unit:String, unitPrice:String, totalAmount:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, vehicleNumber:String, vehicleType:String, driverName:String, driverPhone:String, deliveryAddress:String, note:String, addedBy:String, source:String, sourceId:String }, {timestamps:true});
 const CompanyPurchaseSchema = new mongoose.Schema({ date:String, materialName:String, quantity:Number, unit:String, amount:Number, paymentMode:String, accountName:String, note:String, purchasedBy:String, purchasedByRole:String }, {timestamps:true});
 const SupervisorCashReceiptSchema = new mongoose.Schema({ date:String, supervisorName:String, amount:Number, paymentMode:String, receivedBy:String, receivedByRole:String, note:String }, {timestamps:true});
@@ -145,6 +147,7 @@ const LoadingOperationSchema = new mongoose.Schema({
 LoadingOperationSchema.index({ saleId:1, operation:1, date:-1 });
 LoadingOperationSchema.index({ siteId:1, date:-1 });
 LoadingOperationSchema.index({ workerName:1, date:-1 });
+LoadingOperationSchema.index({ workerType:1, workerName:1, date:-1 });
 const ProductionSiteSchema = new mongoose.Schema({
   date:String, shift:String, workerId:String, workerName:String,
   itemId:String, itemName:String, category:String, shape:String, color:String, size:String, thickness:String, unitType:String,
@@ -2616,6 +2619,90 @@ async function buildSiteWorkerReport(workerName, filters = {}) {
   };
 }
 
+async function buildSiteWorkerReportList(filters = {}) {
+  const [workers, supervisorSites] = await Promise.all([
+    Worker.find().sort({name:1}).select('name role phone').lean(),
+    filters.viewerRole === 'supervisor' && filters.viewerName
+      ? SiteWork.find({addedBy:filters.viewerName}).select('customerName _id').lean()
+      : Promise.resolve(null),
+  ]);
+  if (!workers.length) return [];
+
+  const reportFilter = {};
+  applyDateFilter(reportFilter,filters);
+  let permittedSiteIds = null;
+  if (supervisorSites) {
+    const siteNames = supervisorSites.map(site=>site.customerName).filter(Boolean);
+    permittedSiteIds = supervisorSites.map(site=>String(site._id));
+    reportFilter.$or = [
+      {addedBy:filters.viewerName},
+      ...(siteNames.length ? [{siteName:{$in:siteNames}}] : []),
+      ...(permittedSiteIds.length ? [{siteId:{$in:permittedSiteIds}}] : []),
+    ];
+  }
+
+  const workerNames = [...new Set(workers.map(worker=>worker.name).filter(Boolean))];
+  const dispatchFilter = {workerType:'site-worker',workerName:{$in:workerNames}};
+  applyDateFilter(dispatchFilter,filters);
+  if (filters.site) dispatchFilter.siteName = {$regex:filters.site,$options:'i'};
+  if (filters.item) dispatchFilter.$or = [
+    {operation:{$regex:filters.item,$options:'i'}},
+    {product:{$regex:filters.item,$options:'i'}},
+    {category:{$regex:filters.item,$options:'i'}},
+  ];
+  if (permittedSiteIds) dispatchFilter.siteId = {$in:permittedSiteIds};
+
+  if (filters.site) reportFilter.siteName = {$regex:escapeRegex(filters.site),$options:'i'};
+  reportFilter['workerEntries.workerName'] = {$in:workerNames};
+  const [reports, dispatchEntries, manualPayments] = await Promise.all([
+    DailyReport.find(reportFilter).select('date siteName siteId addedBy workerEntries').sort({date:-1}).lean(),
+    LoadingOperation.find(dispatchFilter).select('date siteName workerName workerType quantity totalAmount paymentGiven').lean(),
+    WorkerPayment.find({workerName:{$in:workerNames},source:'worker-ledger-site'}).select('workerName amount').lean(),
+  ]);
+
+  const totalsByWorker = new Map(workerNames.map(name=>[name,{
+    totalSites:new Set(),totalAreaCompleted:0,totalEarnings:0,totalPaid:0,
+  }]));
+  for (const report of reports) {
+    if (filters.site && !(report.siteName||'').toLowerCase().includes(filters.site.toLowerCase())) continue;
+    for (const entry of report.workerEntries || []) {
+      const totals = totalsByWorker.get(entry.workerName);
+      if (!totals || (filters.item && !(entry.workCategory||'').toLowerCase().includes(filters.item.toLowerCase()))) continue;
+      const normalized = normalizeWorkerEntry(entry);
+      totals.totalSites.add(report.siteName);
+      totals.totalAreaCompleted += normalized.workArea;
+      totals.totalEarnings += normalized.amountEarned;
+      totals.totalPaid += normalized.paymentGiven;
+    }
+  }
+  for (const entry of dispatchEntries) {
+    const totals = totalsByWorker.get(entry.workerName);
+    if (!totals) continue;
+    totals.totalSites.add(entry.siteName);
+    totals.totalAreaCompleted += +(entry.quantity)||0;
+    totals.totalEarnings += +(entry.totalAmount)||0;
+    totals.totalPaid += +(entry.paymentGiven)||0;
+  }
+  for (const payment of manualPayments) {
+    const totals = totalsByWorker.get(payment.workerName);
+    if (totals) totals.totalPaid += +(payment.amount)||0;
+  }
+
+  return workers.map(worker=>{
+    const totals = totalsByWorker.get(worker.name) || {totalSites:new Set(),totalAreaCompleted:0,totalEarnings:0,totalPaid:0};
+    return {
+      name:worker.name,
+      role:worker.role||'',
+      phone:worker.phone||'',
+      totalSites:totals.totalSites.size,
+      totalAreaCompleted:totals.totalAreaCompleted,
+      totalEarnings:totals.totalEarnings,
+      totalPaid:totals.totalPaid,
+      totalPending:Math.max(0,totals.totalEarnings-totals.totalPaid),
+    };
+  }).filter(worker=>worker.totalEarnings>0||worker.totalPaid>0);
+}
+
 async function buildOverallWorkerAccount(workerName, filters = {}) {
   const production = await buildProductionWorkerReport(workerName, filters);
   const site = await buildSiteWorkerReport(workerName, filters);
@@ -2987,13 +3074,8 @@ app.get('/api/workers/reports/production-list', async(req,res)=>{
 
 app.get('/api/workers/reports/site-list', async(req,res)=>{
   try {
-    const workers = await Worker.find().sort({ name: 1 });
     const { fromDate, toDate, date, site, item, role, userName } = req.query;
-    const list = await Promise.all(workers.map(async w => {
-      const r = await buildSiteWorkerReport(w.name, { fromDate, toDate, date, site, item, viewerRole: role, viewerName: userName });
-      return { name: w.name, ...r.worker };
-    }));
-    res.json(list.filter(w => w.totalEarnings > 0 || w.totalPaid > 0));
+    res.json(await buildSiteWorkerReportList({ fromDate, toDate, date, site, item, viewerRole:role, viewerName:userName }));
   } catch(e) { res.status(500).json({ message: e.message }); }
 });
 
