@@ -846,22 +846,22 @@ const Settings = mongoose.model('Settings', SettingsSchema);
 
 const DEFAULT_BRANDING = {
   key: 'branding',
-  companyName: 'P. K. INTERLOCKS & HOLLOW BRICKS',
+  companyName: process.env.COMPANY_LEGAL_NAME || 'P. K. INTERLOCKS & HOLLOW BRICKS',
   shortName: process.env.COMPANY_SHORT_NAME || 'PK Interlock',
-  logo: '🏭',
-  address: 'HAJ ROAD, VILAKKODE, IRITTY',
-  state: 'Kerala',
-  stateCode: '32',
-  gstin: '32AESHA2414P1ZP',
-  phone1: '7034116685',
-  phone2: '9946956685',
-  invoiceTitle: 'TAX INVOICE',
-  invoicePrefix: 'INV',
-  signatureName: 'P.K. Interlocks & Hollowbricks',
-  bankName: '',
-  bankAccount: '',
-  bankIfsc: '',
-  terms: 'Certified that the particulars given above are true and correct.',
+  logo: process.env.COMPANY_LOGO || '🏭',
+  address: process.env.COMPANY_ADDRESS || 'HAJ ROAD, VILAKKODE, IRITTY',
+  state: process.env.COMPANY_STATE || 'Kerala',
+  stateCode: process.env.COMPANY_STATE_CODE || '32',
+  gstin: process.env.COMPANY_GSTIN || '32AESHA2414P1ZP',
+  phone1: process.env.COMPANY_PHONE1 || '7034116685',
+  phone2: process.env.COMPANY_PHONE2 || '9946956685',
+  invoiceTitle: process.env.COMPANY_INVOICE_TITLE || 'TAX INVOICE',
+  invoicePrefix: process.env.COMPANY_INVOICE_PREFIX || 'INV',
+  signatureName: process.env.COMPANY_SIGNATURE_NAME || 'P.K. Interlocks & Hollowbricks',
+  bankName: process.env.COMPANY_BANK_NAME || '',
+  bankAccount: process.env.COMPANY_BANK_ACCOUNT || '',
+  bankIfsc: process.env.COMPANY_BANK_IFSC || '',
+  terms: process.env.COMPANY_TERMS || 'Certified that the particulars given above are true and correct.',
 };
 
 async function getBranding() {
@@ -872,6 +872,21 @@ async function getBranding() {
 async function seedData() {
   const count = await User.countDocuments();
   if (count === 0) {
+    const configuredAdmin = process.env.INITIAL_ADMIN_USERNAME && process.env.INITIAL_ADMIN_PASSWORD
+      ? [{
+          name: process.env.INITIAL_ADMIN_NAME || 'Company Admin',
+          username: process.env.INITIAL_ADMIN_USERNAME,
+          password: process.env.INITIAL_ADMIN_PASSWORD,
+          role: 'admin',
+          avatar: (process.env.INITIAL_ADMIN_NAME || 'Company Admin').split(' ').map(word => word[0]).join('').slice(0,2).toUpperCase(),
+          company: 'default',
+        }]
+      : null;
+    if (configuredAdmin) {
+      await User.insertMany(configuredAdmin);
+      console.log('✅ Initial company admin seeded from environment!');
+      return;
+    }
     await User.insertMany([
       {name:'Ahmed Al-Mansoori',username:'admin',password:'admin123',role:'admin',avatar:'AM',company:'default'},
       {name:'Fatima Hassan',username:'supervisor',password:'sup123',role:'supervisor',avatar:'FH',company:'default'},
