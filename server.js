@@ -36,6 +36,7 @@ const SiteWorkSchema = new mongoose.Schema({ customerName:String, phone:String, 
 const WorkerReportSchema = new mongoose.Schema({ siteName:String, phoneNo:String, startingDate:String, workerName:String, totalArea:String, workingCost:String, extraWork:String, extraMaterial:String, totalWorkingArea:String, totalAmount:String, note:String, paymentMode:String, upiId:String, bankName:String, bankBranch:String, bankAccount:String, amountReceivedBy:String, materialSupply:String, materialType:String, signatures:{supervisor:Boolean,office:Boolean,admin:Boolean}, addedBy:String }, {timestamps:true});
 const DailyReportSchema = new mongoose.Schema({ date:String, entrySection:{type:String,enum:['site','workers','expenses','office']}, siteName:String, siteId:String, siteStatus:String, workersCount:String, totalArea:String, completedToday:String, totalCompleted:String, interlockType:String, dayNotes:String, materialsUnloaded:String, materialQty:String, equipment:String, supplierName:String, materialRemarks:String, extraWorkDesc:String, extraWorkQty:String, extraWorkCost:String, extraWorkRemarks:String, workerEntries:[{workerName:String,attendance:String,dutyArea:String,workDone:String,salary:Number,amountEarned:Number,paymentGiven:Number,pending:Number,remarks:String,workCategory:String,workArea:Number,unit:String,rate:Number,loadingCharge:Number,unloadingCharge:Number,paymentMode:String}], payments:Array, totalPayments:Number, totalReceived:Number, complaints:String, actionTaken:String, complaintRemarks:String, addedBy:String, newSite:String, runningSite:String, workersDetail:String, materialSupply:String, dayNote:String, expenses:String, workerPayments:[{workerName:String,amount:Number,date:String,note:String}] }, {timestamps:true});
 DailyReportSchema.index({ siteId:1, date:-1 });
+DailyReportSchema.index({ date:-1, createdAt:-1 });
 DailyReportSchema.index({ siteName:1, date:-1 });
 DailyReportSchema.index({ 'workerEntries.workerName':1, date:-1 });
 const WorkPlanSchema = new mongoose.Schema({ date:String, siteName:String, task:String, workers:String, materials:String, note:String, status:{type:String,default:'planned'}, fromDate:String, toDate:String, site:String, plannedWork:String, supervisor:String, workersAllocated:String, materialsNeeded:String, estimatedCost:Number, paymentPlan:String, notes:String, archived:{type:Boolean,default:false}, addedBy:String }, {timestamps:true});
@@ -158,6 +159,14 @@ const ProductionSiteSchema = new mongoose.Schema({
   dedupeKey:String,
 }, {timestamps:true});
 ProductionSiteSchema.index({ dedupeKey: 1 }, { unique: true, sparse: true });
+ProductionSiteSchema.index({ producedQty:1, date:-1, createdAt:-1 });
+
+SalesSchema.index({ date:-1, createdAt:-1 });
+PurchaseSchema.index({ date:-1, createdAt:-1 });
+SiteWorkSchema.index({ createdAt:-1 });
+DriverReportSchema.index({ date:-1, createdAt:-1 });
+DriverReportSchema.index({ driverName:1, date:-1 });
+DriverReportSchema.index({ driverMobile:1, date:-1 });
 
 
 
@@ -2894,7 +2903,6 @@ app.post('/api/workerpayments', async(req,res)=>{
 
 app.get('/api/driverreports', async(req,res)=>{
   try {
-    await syncDriverLedgerHistory();
     const { role, name, driver, mobile, date, fromDate, toDate, category } = req.query;
     const filter = {};
     if (role === 'driver' && name) filter.driverName = name;
@@ -2907,7 +2915,7 @@ app.get('/api/driverreports', async(req,res)=>{
       if (fromDate) filter.date.$gte = fromDate;
       if (toDate) filter.date.$lte = toDate;
     }
-    const reports = await DriverReport.find(filter).sort({ date: -1, createdAt: -1 });
+    const reports = await DriverReport.find(filter).sort({ date: -1, createdAt: -1 }).lean();
     res.json({ reports, summary: summarizeDriverReports(reports) });
   } catch(e) { res.status(500).json({ message: e.message }); }
 });
@@ -3810,7 +3818,6 @@ app.get('/api/suppliers/reports', async(req,res)=>{
 
 app.get("/api/productionsite", async(req,res)=>{
   try {
-    await cleanupDuplicateProductionEntries();
     const { worker, item, color, date, fromDate, toDate } = req.query;
     const filter = {};
     if (worker) filter.workerName = { $regex: worker, $options: 'i' };
@@ -3822,7 +3829,7 @@ app.get("/api/productionsite", async(req,res)=>{
       if (fromDate) filter.date.$gte = fromDate;
       if (toDate) filter.date.$lte = toDate;
     }
-    res.json(await ProductionSiteEntry.find(filter).sort({ createdAt: -1 }));
+    res.json(await ProductionSiteEntry.find(filter).sort({ createdAt: -1 }).lean());
   } catch(e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -3968,7 +3975,6 @@ app.delete("/api/productionsite/:id", async(req,res)=>{
 
 app.get('/api/productionsite/reports', async(req,res)=>{
   try {
-    await cleanupDuplicateProductionEntries();
     const { type, fromDate, toDate, pending } = req.query;
     const filter = { producedQty: { $exists: true, $gt: 0 } };
     if (fromDate || toDate) {
@@ -3976,8 +3982,10 @@ app.get('/api/productionsite/reports', async(req,res)=>{
       if (fromDate) filter.date.$gte = fromDate;
       if (toDate) filter.date.$lte = toDate;
     }
-    const entries = await ProductionSiteEntry.find(filter).sort({ createdAt: -1 });
-    const workers = await Worker.find().sort({ name: 1 });
+    const [entries, workers] = await Promise.all([
+      ProductionSiteEntry.find(filter).sort({ createdAt: -1 }).lean(),
+      Worker.find().sort({ name: 1 }).lean(),
+    ]);
 
     const workerMap = {};
     entries.forEach(e => {
@@ -4031,7 +4039,6 @@ app.get('/api/office-daily-report', async(req,res)=>{
     const accessRole = role;
     if (accessRole !== 'admin') return res.status(403).json({ message: 'Office daily report is available only to Admin and User' });
 
-    await cleanupDuplicateProductionEntries();
     const [sales, purchases, productionEntries, driverReports, supervisorCashReceipts] = await Promise.all([
       Sales.find({ date }).sort({ createdAt: -1 }).lean(),
       Purchase.find({ date }).sort({ createdAt: -1 }).lean(),
@@ -4141,7 +4148,6 @@ app.get('/api/dashboard-summary', async(req,res)=>{
     const accessRole = role === 'user' ? 'admin' : role;
     if (accessRole !== 'admin') return res.status(403).json({ message: 'Dashboard summary is available only to Admin and User' });
 
-    await cleanupDuplicateProductionEntries();
     const dateFilter = {};
     if (fromDate || toDate) {
       dateFilter.date = {};
@@ -4745,6 +4751,8 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, async()=>{
   console.log(`🚀 Server running on port ${PORT}`);
   await seedData();
+  const removedProductionDuplicates = await cleanupDuplicateProductionEntries();
+  console.log(`Production entries checked; duplicate rows removed: ${removedProductionDuplicates}`);
   const driverLedgerSync = await syncDriverLedgerHistory();
   console.log(`Driver ledger history checked: ${driverLedgerSync.checked}, updated: ${driverLedgerSync.updated}`);
 });
