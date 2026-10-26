@@ -1921,6 +1921,20 @@ app.post('/api/sitework/:id/completion/review', async(req,res)=>{
       return res.json(await recalcSiteFinancials(site));
     }
 
+    const financials = await recalcSiteFinancials(site);
+    const pendingBeforeWaiver = Math.max(0, +(financials.pendingAmount)||0);
+    const waiverAmount = +(req.body.waiveAmount)||0;
+    const waiverNote = String(req.body.waiveNote||'').trim();
+    if (!Number.isFinite(waiverAmount) || waiverAmount < 0) return res.status(400).json({ message:'Waiver amount must be zero or more' });
+    if (waiverAmount > pendingBeforeWaiver) return res.status(400).json({ message:`Waiver cannot exceed the pending balance of ${pendingBeforeWaiver}` });
+    if (waiverAmount > 0 && !waiverNote) return res.status(400).json({ message:'Enter a reason for the waiver' });
+    if (waiverAmount > 0) {
+      const priorNote = String(site.completionDiscountNote||'').trim();
+      const waiverAudit = `Waived ${waiverAmount} by ${name||role} (${role}) on ${new Date().toISOString()}: ${waiverNote}`;
+      site.completionDiscount = (+(site.completionDiscount)||0) + waiverAmount;
+      site.completionDiscountNote = [priorNote, waiverAudit].filter(Boolean).join('\n');
+    }
+
     if (role === 'user') {
       if (site.completionApprovalStatus !== 'pending_user') return res.status(400).json({ message:'Site is not awaiting User approval' });
       site.completionApprovalStatus = 'pending_admin';
