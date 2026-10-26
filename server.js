@@ -16,7 +16,7 @@ const UserSchema = new mongoose.Schema({ name:String, username:{type:String,uniq
 const StockSchema = new mongoose.Schema({ name:String, category:String, productType:String, itemId:String, shape:String, color:String, size:String, thickness:String, unit:String, quantity:Number, sqftPerPiece:Number, sqftQuantity:Number, minStock:Number, price:Number, company:String }, {timestamps:true});
 const RawMaterialSchema = new mongoose.Schema({ name:String, material:String, supplier:String, unit:String, quantity:Number, qty:Number, price:Number, costPerUnit:Number, lastPurchase:String, company:String }, {timestamps:true});
 const ProductionSchema = new mongoose.Schema({ date:String, product:String, shift:String, target:Number, produced:Number, machine:String, supervisor:String, status:{type:String,default:'pending'}, notes:String, note:String, company:String }, {timestamps:true});
-const SalesSchema = new mongoose.Schema({ date:String, customer:String, mobileNumber:String, address:String, gstNumber:String, state:String, stateCode:String, reverseCharge:String, transportMode:String, vehicleNumber:String, dateOfSupply:String, placeOfSupply:String, hsnSac:String, bankName:String, bankAccount:String, bankIfsc:String, terms:String, product:String, productType:String, itemId:String, category:String, shape:String, color:String, size:String, thickness:String, interlockDetails:String, quantity:Number, sqftPerPiece:Number, sqftQty:Number, unit:String, price:Number, unitPrice:Number, discount:{type:Number,default:0}, taxableAmount:Number, billType:String, cgstPercent:Number, sgstPercent:Number, cgstAmount:Number, sgstAmount:Number, total:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, invoiceNumber:String, status:{type:String,default:'pending'}, addedBy:String, company:String }, {timestamps:true});
+const SalesSchema = new mongoose.Schema({ date:String, customer:String, mobileNumber:String, address:String, gstNumber:String, state:String, stateCode:String, reverseCharge:String, transportMode:String, vehicleNumber:String, dateOfSupply:String, placeOfSupply:String, hsnSac:String, bankName:String, bankAccount:String, bankIfsc:String, terms:String, product:String, productType:String, itemId:String, category:String, shape:String, color:String, size:String, thickness:String, interlockDetails:String, quantity:Number, sqftPerPiece:Number, sqftQty:Number, unit:String, price:Number, unitPrice:Number, discount:{type:Number,default:0}, loadingCharge:{type:Number,default:0}, unloadingCharge:{type:Number,default:0}, workerCharges:[{operation:{type:String,enum:['load','unload']},workerId:String,workerName:String,workerType:String,rate:Number}], taxableAmount:Number, billType:String, cgstPercent:Number, sgstPercent:Number, cgstAmount:Number, sgstAmount:Number, total:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, invoiceNumber:String, status:{type:String,default:'pending'}, addedBy:String, company:String }, {timestamps:true});
 const QuotationSchema = new mongoose.Schema({
   quotationNumber:String, date:String, validUntil:String, customerId:String, customer:String, mobileNumber:String, address:String, gstNumber:String, state:String, stateCode:String,
   shipToName:String, shipToAddress:String, shipToGstNumber:String, shipToState:String, shipToStateCode:String,
@@ -126,8 +126,8 @@ const LoadingOperationSchema = new mongoose.Schema({
   saleId:{ type:String, required:true },
   invoiceNumber:String,
   customerName:String,
-  siteId:{ type:String, required:true },
-  siteName:{ type:String, required:true },
+  siteId:String,
+  siteName:String,
   workerId:{ type:String, required:true },
   workerName:{ type:String, required:true },
   workerType:{ type:String, enum:['site-worker','production-worker'] },
@@ -146,6 +146,7 @@ const LoadingOperationSchema = new mongoose.Schema({
   rate:Number,
   totalAmount:Number,
   paymentGiven:{ type:Number, default:0 },
+  sourceType:{ type:String, enum:['dispatch','sale-earning'], default:'dispatch' },
   remarks:String,
   addedBy:String,
   submissionKey:{ type:String, unique:true, sparse:true },
@@ -1274,6 +1275,7 @@ app.get('/api/sales', async(req,res)=>{
 });
 app.post('/api/sales', async(req,res)=>{
   try {
+    const workerCharges = await normalizeSaleWorkerCharges(req.body.workerCharges, []);
     const mobile = normalizeMobile(req.body.mobileNumber);
     if (!mobile || mobile.length < 10) return res.status(400).json({ message: 'Valid mobile number is required' });
     const quantity = +(req.body.quantity) || 0;
@@ -1296,9 +1298,10 @@ app.post('/api/sales', async(req,res)=>{
     const branding = await getBranding();
     const prefix = String(branding.invoicePrefix || 'INV').trim() || 'INV';
     const invoiceNumber = req.body.invoiceNumber || `${prefix}-${Date.now().toString().slice(-8)}`;
-    const sale = await Sales.create({ ...req.body, mobileNumber: mobile, invoiceNumber, productType, quantity, sqftPerPiece, sqftQty, taxableAmount, cgstPercent, sgstPercent, cgstAmount, sgstAmount, total, discount, amountPaid, amountPending, status });
+    const sale = await Sales.create({ ...req.body, workerCharges, mobileNumber: mobile, invoiceNumber, productType, quantity, sqftPerPiece, sqftQty, taxableAmount, cgstPercent, sgstPercent, cgstAmount, sgstAmount, total, discount, amountPaid, amountPending, status });
     await adjustStockFromSale(sale, -1);
     await upsertCustomerFromSale(sale, req.body.saveToCustomerMaster !== false);
+    await syncSaleWorkerCharges(sale, workerCharges, req.body.addedBy);
     res.json(sale);
   } catch(e) { res.status(400).json({ message: e.message }); }
 });
@@ -1307,7 +1310,8 @@ app.put('/api/sales/:id', async(req,res)=>{
     if (!auditReasonOf(req)) return res.status(400).json({ message: 'Reason is required' });
     const oldSale = await Sales.findById(req.params.id);
     if (!oldSale) return res.status(404).json({ message: 'Sale not found' });
-    const dispatchCount = await LoadingOperation.countDocuments({ saleId:String(oldSale._id) });
+    const workerCharges = await normalizeSaleWorkerCharges(req.body.workerCharges, oldSale.workerCharges || []);
+    const dispatchCount = await LoadingOperation.countDocuments({ saleId:String(oldSale._id), sourceType:{$ne:'sale-earning'} });
     const dispatchIdentityChanged = +(req.body.quantity || 0) !== +(oldSale.quantity || 0)
       || String(req.body.itemId || '') !== String(oldSale.itemId || '')
       || String(req.body.product || '') !== String(oldSale.product || '')
@@ -1332,10 +1336,11 @@ app.put('/api/sales/:id', async(req,res)=>{
     const amountPending = Math.max(0, total - amountPaid);
     const status = amountPending <= 0 ? 'paid' : amountPaid > 0 ? 'partial' : 'pending';
     const sale = await Sales.findByIdAndUpdate(req.params.id, {
-      ...req.body, mobileNumber: mobile, productType, quantity, sqftPerPiece, sqftQty,
+      ...req.body, workerCharges, mobileNumber: mobile, productType, quantity, sqftPerPiece, sqftQty,
       taxableAmount, cgstPercent, sgstPercent, cgstAmount, sgstAmount, total, discount, amountPaid, amountPending, status,
     }, {new:true});
     if (sale) await adjustStockFromSale(sale, -1);
+    if (sale) await syncSaleWorkerCharges(sale, workerCharges, req.body.addedBy);
     await createReportAudit({ req, recordType: 'Sale', action: 'edit', before: oldSale, after: sale });
     await upsertCustomerFromSale(sale, req.body.saveToCustomerMaster !== false);
     if (oldSale?.mobileNumber) await recalcCustomerTotals(normalizeMobile(oldSale.mobileNumber));
@@ -1347,11 +1352,12 @@ app.delete('/api/sales/:id', async(req,res)=>{
   try {
     if (!auditReasonOf(req)) return res.status(400).json({ message: 'Reason is required' });
     const sale = await Sales.findById(req.params.id);
-    if (sale && await LoadingOperation.exists({ saleId:String(sale._id) })) {
+    if (sale && await LoadingOperation.exists({ saleId:String(sale._id), sourceType:{$ne:'sale-earning'} })) {
       return res.status(400).json({ message:'Delete the sale loading/unloading entries before deleting this sale' });
     }
     if (sale) await adjustStockFromSale(sale, 1);
     await createReportAudit({ req, recordType: 'Sale', action: 'delete', before: sale });
+    if (sale) await syncSaleWorkerCharges(sale, [], req.body.addedBy);
     await Sales.findByIdAndDelete(req.params.id);
     if (sale?.mobileNumber) await recalcCustomerTotals(normalizeMobile(sale.mobileNumber));
     res.json({ok:true});
@@ -1376,6 +1382,66 @@ function loadingProductDetails(sale) {
 
 function loadingSaleQuantity(sale) {
   return +(sale?.quantity ?? sale?.qty ?? sale?.count ?? sale?.pieces ?? 0) || 0;
+}
+
+async function normalizeSaleWorkerCharges(rawCharges, previousCharges = []) {
+  if (rawCharges == null) return previousCharges || [];
+  if (!Array.isArray(rawCharges)) throw Object.assign(new Error('Worker loading/unloading charges are invalid'), {statusCode:400});
+  const operations = new Set();
+  const normalized = [];
+  for (const charge of rawCharges) {
+    const operation = charge?.operation;
+    const workerId = String(charge?.workerId || '');
+    const rate = +(charge?.rate) || 0;
+    if (!['load','unload'].includes(operation) || operations.has(operation)) {
+      throw Object.assign(new Error('Choose each loading/unloading charge only once'), {statusCode:400});
+    }
+    if (!mongoose.isValidObjectId(workerId) || rate <= 0) {
+      throw Object.assign(new Error(`Select an active worker and a valid ${operation === 'load' ? 'loading' : 'unloading'} rate`), {statusCode:400});
+    }
+    const worker = await Worker.findById(workerId);
+    const previous = (previousCharges || []).find(entry => entry.operation === operation && String(entry.workerId) === workerId);
+    if (!worker || (!isWorkerActive(worker) && !previous)) {
+      throw Object.assign(new Error('Select an active worker for loading/unloading'), {statusCode:400});
+    }
+    operations.add(operation);
+    normalized.push({
+      operation, workerId:String(worker._id), workerName:worker.name,
+      workerType:normalizeWorkerType(worker) === 'Site Worker' ? 'site-worker' : 'production-worker', rate,
+    });
+  }
+  return normalized;
+}
+
+async function syncSaleWorkerCharges(sale, assignments = [], addedBy = '') {
+  const saleId = String(sale._id);
+  const existing = await LoadingOperation.find({saleId, sourceType:'sale-earning'}).lean();
+  const retainedOperations = [];
+  const affectedWorkers = new Set(existing.map(entry => entry.workerName).filter(Boolean));
+  for (const assignment of assignments) {
+    const operation = assignment.operation;
+    const quantity = loadingSaleQuantity(sale);
+    const details = loadingProductDetails(sale);
+    const payload = {
+      date:sale.date || indiaDateString(), time:'', operation, saleId,
+      invoiceNumber:sale.invoiceNumber || '', customerName:sale.customer || '',
+      siteId:'', siteName:'Sales Loading / Unloading',
+      workerId:String(assignment.workerId), workerName:assignment.workerName,
+      workerType:assignment.workerType, ...details, quantity,
+      sqftQty:details.productType === 'hollowbrick' ? 0 : quantity * details.sqftPerPiece,
+      rate:+assignment.rate, totalAmount:quantity * (+assignment.rate || 0),
+      paymentGiven:0, remarks:'Sales-linked worker earning', addedBy:addedBy || sale.addedBy || '',
+      sourceType:'sale-earning', submissionKey:`sale-earning-${saleId}-${operation}`,
+    };
+    await LoadingOperation.findOneAndUpdate(
+      {saleId, sourceType:'sale-earning', operation}, {$set:payload},
+      {upsert:true, new:true, setDefaultsOnInsert:true, runValidators:true}
+    );
+    retainedOperations.push(operation);
+    affectedWorkers.add(assignment.workerName);
+  }
+  await LoadingOperation.deleteMany({saleId, sourceType:'sale-earning', operation:{$nin:retainedOperations}});
+  for (const workerName of affectedWorkers) await syncWorkerTotals(workerName);
 }
 
 async function normalizeLoadingOperation(body = {}, excludeId = null) {
@@ -1406,7 +1472,7 @@ async function normalizeLoadingOperation(body = {}, excludeId = null) {
   }
   const operationFilter = { saleId:String(sale._id) };
   if (excludeId) operationFilter._id = { $ne:excludeId };
-  const operations = await LoadingOperation.find(operationFilter).lean();
+  const operations = await LoadingOperation.find({...operationFilter, sourceType:{$ne:'sale-earning'}}).lean();
   const loaded = operations.filter(row => row.operation === 'load').reduce((sum,row) => sum + (+(row.quantity) || 0), 0);
   const loadedAtSite = operations.filter(row => row.operation === 'load' && row.siteId === String(site._id)).reduce((sum,row) => sum + (+(row.quantity) || 0), 0);
   const unloadedAtSite = operations.filter(row => row.operation === 'unload' && row.siteId === String(site._id)).reduce((sum,row) => sum + (+(row.quantity) || 0), 0);
@@ -1425,6 +1491,7 @@ async function normalizeLoadingOperation(body = {}, excludeId = null) {
     date:body.date || new Date().toISOString().slice(0,10),
     time:body.time || new Date().toTimeString().slice(0,5),
     operation,
+    sourceType:'dispatch',
     saleId:String(sale._id),
     invoiceNumber:sale.invoiceNumber || '',
     customerName:sale.customer || '',
@@ -1449,7 +1516,7 @@ app.get('/api/loading-operations/availability', async(req,res)=>{
   try {
     const [sales, operations] = await Promise.all([
       Sales.find().sort({ date:-1, createdAt:-1 }).lean(),
-      LoadingOperation.find().sort({ date:-1, time:-1, createdAt:-1 }).lean(),
+      LoadingOperation.find({sourceType:{$ne:'sale-earning'}}).sort({ date:-1, time:-1, createdAt:-1 }).lean(),
     ]);
     const bySale = new Map();
     operations.forEach(row => {
@@ -1489,7 +1556,7 @@ app.get('/api/loading-operations/availability', async(req,res)=>{
 app.get('/api/loading-operations', async(req,res)=>{
   try {
     const { saleId, siteId, workerName, operation, date, fromDate, toDate } = req.query;
-    const filter = {};
+    const filter = { sourceType:{$ne:'sale-earning'} };
     if (saleId) filter.saleId = saleId;
     if (siteId) filter.siteId = siteId;
     if (workerName) filter.workerName = workerName;
@@ -2567,12 +2634,16 @@ async function buildSiteWorkerReport(workerName, filters = {}) {
   const dispatchFilter = { workerName, workerType:'site-worker' };
   applyDateFilter(dispatchFilter, filters);
   if (filters.site) dispatchFilter.siteName = { $regex:filters.site, $options:'i' };
-  if (filters.item) dispatchFilter.$or = [
+  const dispatchRestrictions = [];
+  if (filters.item) dispatchRestrictions.push({$or:[
     { operation:{ $regex:filters.item, $options:'i' } },
     { product:{ $regex:filters.item, $options:'i' } },
     { category:{ $regex:filters.item, $options:'i' } },
-  ];
-  if (permittedSupervisorSiteIds) dispatchFilter.siteId = { $in:permittedSupervisorSiteIds };
+  ]});
+  if (permittedSupervisorSiteIds) dispatchRestrictions.push({$or:[
+    {siteId:{$in:permittedSupervisorSiteIds}}, {sourceType:'sale-earning'}
+  ]});
+  if (dispatchRestrictions.length) dispatchFilter.$and = dispatchRestrictions;
   const dispatchEntries = await LoadingOperation.find(dispatchFilter).sort({ date:-1, time:-1, createdAt:-1 });
   dispatchEntries.forEach(entry => {
     const earned = +(entry.totalAmount) || 0;
@@ -2689,18 +2760,22 @@ async function buildSiteWorkerReportList(filters = {}) {
   const dispatchFilter = {workerType:'site-worker',workerName:{$in:workerNames}};
   applyDateFilter(dispatchFilter,filters);
   if (filters.site) dispatchFilter.siteName = {$regex:filters.site,$options:'i'};
-  if (filters.item) dispatchFilter.$or = [
+  const dispatchRestrictions = [];
+  if (filters.item) dispatchRestrictions.push({$or:[
     {operation:{$regex:filters.item,$options:'i'}},
     {product:{$regex:filters.item,$options:'i'}},
     {category:{$regex:filters.item,$options:'i'}},
-  ];
-  if (permittedSiteIds) dispatchFilter.siteId = {$in:permittedSiteIds};
+  ]});
+  if (permittedSiteIds) dispatchRestrictions.push({$or:[
+    {siteId:{$in:permittedSiteIds}}, {sourceType:'sale-earning'}
+  ]});
+  if (dispatchRestrictions.length) dispatchFilter.$and = dispatchRestrictions;
 
   if (filters.site) reportFilter.siteName = {$regex:escapeRegex(filters.site),$options:'i'};
   reportFilter['workerEntries.workerName'] = {$in:workerNames};
   const [reports, dispatchEntries, manualPayments] = await Promise.all([
     DailyReport.find(reportFilter).select('date siteName siteId addedBy workerEntries').sort({date:-1}).lean(),
-    LoadingOperation.find(dispatchFilter).select('date siteName workerName workerType quantity totalAmount paymentGiven').lean(),
+    LoadingOperation.find(dispatchFilter).select('date siteName workerName workerType sourceType quantity totalAmount paymentGiven').lean(),
     WorkerPayment.find({workerName:{$in:workerNames},source:'worker-ledger-site'}).select('workerName amount').lean(),
   ]);
 
@@ -2722,8 +2797,10 @@ async function buildSiteWorkerReportList(filters = {}) {
   for (const entry of dispatchEntries) {
     const totals = totalsByWorker.get(entry.workerName);
     if (!totals) continue;
-    totals.totalSites.add(entry.siteName);
-    totals.totalAreaCompleted += +(entry.quantity)||0;
+    if (entry.sourceType !== 'sale-earning') {
+      totals.totalSites.add(entry.siteName);
+      totals.totalAreaCompleted += +(entry.quantity)||0;
+    }
     totals.totalEarnings += +(entry.totalAmount)||0;
     totals.totalPaid += +(entry.paymentGiven)||0;
   }
@@ -3901,9 +3978,9 @@ async function buildProductionEntryData(body = {}) {
     error.statusCode = 400;
     throw error;
   }
-  const loadingCharge = +(body.loadingCharge) || 0;
-  const unloadingCharge = +(body.unloadingCharge) || 0;
-  const totalAmount = ((productType === 'hollowbrick' && productionUnit === 'box' ? boxQty : producedQty) * productionRate) + loadingCharge + unloadingCharge;
+  const loadingCharge = 0;
+  const unloadingCharge = 0;
+  const totalAmount = (productType === 'hollowbrick' && productionUnit === 'box' ? boxQty : producedQty) * productionRate;
   const paymentGiven = +(body.paymentGiven) || 0;
   const amountPending = Math.max(0, totalAmount - paymentGiven);
   const entryData = {
