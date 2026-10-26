@@ -32,7 +32,7 @@ const QuotationSchema = new mongoose.Schema({
   signature:{ dataUrl:String, signedBy:String, signedAt:Date }
 }, {timestamps:true});
 const CustomerSchema = new mongoose.Schema({ mobile:{type:String,unique:true}, name:String, address:String, gstNumber:String, notes:String, totalPurchases:{type:Number,default:0}, totalSalesAmount:{type:Number,default:0}, totalDiscount:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, totalQuantity:{type:Number,default:0}, company:String, addedBy:String }, {timestamps:true});
-const SiteWorkSchema = new mongoose.Schema({ customerName:String, phone:String, siteLocation:String, location:String, interlockItemId:String, interlockType:String, interlockColor:String, selectedWorkers:[String], startDate:String, endDate:String, status:{type:String,default:'running'}, workUnit:String, workSize:String, ratePerUnit:String, baseWorkCost:String, extraWork:Array, extraMaterials:Array, materialCost:String, laborCost:String, totalCost:String, payments:Array, legacyReceived:Number, totalReceived:Number, pendingAmount:String, paymentStatus:{type:String,default:'pending'}, paymentMode:String, note:String, addedBy:String, workStatus:String, totalAmount:Number, paidAmount:Number, company:String, completionApprovalStatus:String, completionSubmittedBy:String, completionSubmittedAt:Date, userApprovedBy:String, userApprovedAt:Date, adminApprovedBy:String, adminApprovedAt:Date, completionRejectedBy:String, completionRejectedRole:String, completionRejectedAt:Date, completionRejectionReason:String }, {timestamps:true});
+const SiteWorkSchema = new mongoose.Schema({ customerName:String, phone:String, siteLocation:String, location:String, interlockItemId:String, interlockType:String, interlockColor:String, selectedWorkers:[String], startDate:String, endDate:String, status:{type:String,default:'running'}, workUnit:String, workSize:String, ratePerUnit:String, baseWorkCost:String, extraWork:Array, extraMaterials:Array, materialCost:String, laborCost:String, totalCost:String, payments:Array, legacyReceived:Number, totalReceived:Number, pendingAmount:String, completionDiscount:{type:Number,default:0}, completionDiscountNote:String, paymentStatus:{type:String,default:'pending'}, paymentMode:String, note:String, addedBy:String, workStatus:String, totalAmount:Number, paidAmount:Number, company:String, completionApprovalStatus:String, completionSubmittedBy:String, completionSubmittedAt:Date, userApprovedBy:String, userApprovedAt:Date, adminApprovedBy:String, adminApprovedAt:Date, completionRejectedBy:String, completionRejectedRole:String, completionRejectedAt:Date, completionRejectionReason:String }, {timestamps:true});
 const WorkerReportSchema = new mongoose.Schema({ siteName:String, phoneNo:String, startingDate:String, workerName:String, totalArea:String, workingCost:String, extraWork:String, extraMaterial:String, totalWorkingArea:String, totalAmount:String, note:String, paymentMode:String, upiId:String, bankName:String, bankBranch:String, bankAccount:String, amountReceivedBy:String, materialSupply:String, materialType:String, signatures:{supervisor:Boolean,office:Boolean,admin:Boolean}, addedBy:String }, {timestamps:true});
 const DailyReportSchema = new mongoose.Schema({ date:String, entrySection:{type:String,enum:['site','workers','expenses','office']}, siteName:String, siteId:String, siteStatus:String, workersCount:String, totalArea:String, completedToday:String, totalCompleted:String, interlockType:String, dayNotes:String, materialsUnloaded:String, materialQty:String, equipment:String, supplierName:String, materialRemarks:String, extraWorkDesc:String, extraWorkQty:String, extraWorkCost:String, extraWorkRemarks:String, workerEntries:[{workerName:String,attendance:String,dutyArea:String,workDone:String,salary:Number,amountEarned:Number,paymentGiven:Number,pending:Number,remarks:String,workCategory:String,workArea:Number,unit:String,rate:Number,loadingCharge:Number,unloadingCharge:Number,paymentMode:String}], payments:Array, totalPayments:Number, totalReceived:Number, complaints:String, actionTaken:String, complaintRemarks:String, addedBy:String, newSite:String, runningSite:String, workersDetail:String, materialSupply:String, dayNote:String, expenses:String, workerPayments:[{workerName:String,amount:Number,date:String,note:String}] }, {timestamps:true});
 DailyReportSchema.index({ siteId:1, date:-1 });
@@ -1741,6 +1741,20 @@ app.put('/api/sitework/:id', async(req,res)=>{
   if (!current) return res.status(404).json({ message: 'Site not found' });
   if (body.status === 'completed' && current.status !== 'completed') {
     return res.status(400).json({ message: 'Submit the site through Completed Works for User and Admin approval' });
+  }
+  const requestedDiscount = Math.max(0, +(body.completionDiscount)||0);
+  if (requestedDiscount > 0 && current.status !== 'completed') {
+    return res.status(400).json({ message:'A completion discount can be applied only after the site is completed' });
+  }
+  if (current.status === 'completed') {
+    const refreshed = await recalcSiteFinancials(current);
+    const updatedSiteCost = siteCostOf({ ...current.toObject(), ...body });
+    const maxDiscount = Math.max(0, updatedSiteCost - (+(refreshed.totalReceived)||0));
+    if (requestedDiscount > maxDiscount) return res.status(400).json({ message:`Completion discount cannot exceed the remaining balance of ${maxDiscount}` });
+    body.completionDiscount = requestedDiscount;
+  } else {
+    body.completionDiscount = 0;
+    body.completionDiscountNote = '';
   }
   const workerValidation = await validateSiteWorkAssignedWorkers(body);
   if (workerValidation) return res.status(400).json({ message: workerValidation });
@@ -3712,7 +3726,8 @@ async function buildSiteWorkReadResponse(sites) {
     const legacyReceived = await getLegacySiteWorkPayment(site,dailyPayments,cashPayments);
     const totalReceived = siteWorkPaymentsOf(site) + legacyReceived + dailyPayments + cashPayments;
     const siteCost = siteCostOf(site);
-    const pendingAmount = Math.max(0,siteCost-totalReceived);
+    const completionDiscount = +(site.completionDiscount)||0;
+    const pendingAmount = Math.max(0,siteCost-totalReceived-completionDiscount);
     return {
       ...site,
       totalReceived,
@@ -3760,7 +3775,7 @@ async function recalcSiteFinancials(siteOrId) {
     getCashTransactionSitePayments(site),
   ]);
   const totalReceived = siteWorkPaymentsOf(site) + await getLegacySiteWorkPayment(site, dailySitePayments, cashTransactionPayments) + dailySitePayments + cashTransactionPayments;
-  const pendingAmount = Math.max(0, siteCostOf(site) - totalReceived);
+  const pendingAmount = Math.max(0, siteCostOf(site) - totalReceived - (+(site.completionDiscount)||0));
   const paymentStatus = pendingAmount === 0 && siteCostOf(site) > 0 ? 'paid' : totalReceived > 0 ? 'partial' : 'pending';
   site.totalReceived = totalReceived;
   site.paidAmount = totalReceived;
