@@ -3,15 +3,67 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const crypto = require('crypto');
 const { hashPassword, verifyPassword, createAiToken, verifyAiToken } = require('./auth-security');
+const { isAllowedForRole } = require('./api-access');
 require('dotenv').config();
 
 const app = express();
 const allowedOrigins = String(process.env.CORS_ORIGIN || '').split(',').map(origin=>origin.trim()).filter(Boolean);
 app.use(cors({origin:(origin,callback)=>{
-  if(!origin || !allowedOrigins.length || allowedOrigins.includes(origin)) return callback(null,true);
+  if(!origin || (process.env.NODE_ENV !== 'production' && !allowedOrigins.length) || allowedOrigins.includes(origin)) return callback(null,true);
   return callback(new Error('Origin is not allowed by CORS'));
 }}));
 app.use(express.json({ limit: '2mb' }));
+
+app.use('/api', async(req,res,next)=>{
+  const path=req.originalUrl.split('?')[0];
+  if(path==='/api/login'||/^\/api\/public\/quotations\/[^/]+(?:\/sign)?$/.test(path))return next();
+  try {
+    if(!process.env.AUTH_TOKEN_SECRET)return res.status(503).json({message:'Authentication is not configured'});
+    const token=(req.headers.authorization||'').replace(/^Bearer\s+/i,'');
+    const claims=verifyAiToken(token,process.env.AUTH_TOKEN_SECRET);
+    if(!claims)return res.status(401).json({message:'Please sign in again'});
+    const user=await User.findById(claims.sub).select('_id username name role active');
+    if(!user||user.active===false)return res.status(401).json({message:'Account is inactive or no longer available'});
+    if(!isAllowedForRole(user.role,req.method,path))return res.status(403).json({message:'Your account role cannot access this action'});
+    if(['supervisor','driver'].includes(user.role)&&path!=='/api/devices/check') {
+      const deviceId=String(req.headers['x-device-id']||'');
+      const device=deviceId&&await Device.findOne({deviceId,username:user.username,status:'approved'}).select('_id');
+      if(!device)return res.status(403).json({message:'This device is not approved'});
+    }
+    req.authUser=user;
+    if(req.body&&typeof req.body==='object') {
+      req.body.addedBy=user.name;
+      req.body.auditBy=user.name;
+      req.body.auditRole=user.role;
+      if('updatedBy'in req.body)req.body.updatedBy=user.name;
+      if(user.role==='supervisor'&&path==='/api/company-purchases') {
+        req.body.purchasedBy=user.name;
+        req.body.purchasedByRole=user.role;
+      }
+      if(user.role==='driver'&&path==='/api/driverreports') {
+        req.body.driverName=user.name;
+        req.body.driverMobile=user.mobile||'';
+      }
+    }
+    if(user.role==='supervisor') {
+      const ownershipCollection={
+        sitework:SiteWork,
+        dailyreport:DailyReport,
+        workerreport:WorkerReport,
+        workplan:WorkPlan,
+        purchases:Purchase,
+        quotations:Quotation,
+      };
+      const [, resource, id] = path.match(/^\/api\/([^/]+)\/([^/]+)/)||[];
+      const Model=ownershipCollection[resource];
+      if(Model&&id&&mongoose.isValidObjectId(id)) {
+        const owned=await Model.exists({_id:id,addedBy:user.name});
+        if(!owned)return res.status(404).json({message:'Record not found'});
+      }
+    }
+    next();
+  } catch(e) { res.status(500).json({message:'Authentication check failed'}); }
+});
 
 if (!process.env.MONGO_URI) console.error('❌ MONGO_URI is required; database connection is disabled.');
 else mongoose.connect(process.env.MONGO_URI)
@@ -1177,6 +1229,7 @@ app.post('/api/attendance-register', async(req,res)=>{
 });
 app.post('/api/login', async(req,res)=>{
   try {
+    if(!process.env.AUTH_TOKEN_SECRET)return res.status(503).json({message:'Authentication is not configured'});
     const {username,password}=req.body;
     const user = await User.findOne({username,active:true});
     if (user && !await verifyPassword(password, user.password)) return res.status(401).json({message:'Invalid credentials'});
@@ -1186,7 +1239,7 @@ app.post('/api/login', async(req,res)=>{
       await user.save();
     }
     const response = {_id:user._id,name:user.name,username:user.username,role:user.role,avatar:user.avatar,mobile:user.mobile,vehicleName:user.vehicleName,vehicleNumber:user.vehicleNumber,company:user.company};
-    if (process.env.AUTH_TOKEN_SECRET) response.aiToken = createAiToken(user, process.env.AUTH_TOKEN_SECRET);
+    response.aiToken = createAiToken(user, process.env.AUTH_TOKEN_SECRET);
     res.json(response);
   } catch(e){ res.status(500).json({message:'Server error'}); }
 });
@@ -1636,6 +1689,7 @@ app.get('/api/quotations', async(req,res)=>{
       if (fromDate) filter.date.$gte = fromDate;
       if (toDate) filter.date.$lte = toDate;
     }
+    if(req.authUser.role==='supervisor') filter.addedBy=req.authUser.name;
     res.json(await Quotation.find(filter).sort({createdAt:-1}));
   } catch(e) { res.status(500).json({ message: e.message }); }
 });
@@ -1645,7 +1699,7 @@ app.post('/api/quotations', async(req,res)=>{
     const mobile = normalizeMobile(req.body.mobileNumber);
     if (!mobile || mobile.length < 10) return res.status(400).json({ message: 'Valid mobile number is required' });
     if (!Array.isArray(req.body.items) || !req.body.items.length) return res.status(400).json({ message: 'Add at least one product' });
-    const data = normalizeQuotation({ ...req.body, mobileNumber: mobile, shareToken: req.body.shareToken || createQuotationShareToken(), sharedAt: new Date() });
+    const data = normalizeQuotation({ ...req.body, addedBy:req.authUser.name, mobileNumber: mobile, shareToken: req.body.shareToken || createQuotationShareToken(), sharedAt: new Date() });
     const quotation = await Quotation.create(data);
     await upsertCustomerBasic(quotation, req.body.saveToCustomerMaster !== false);
     res.json(quotation);
@@ -1795,12 +1849,14 @@ app.get('/api/customers/reports', async(req,res)=>{
 
 app.get('/api/sitework', async(req,res)=>{
   try {
-    const sites = await SiteWork.find().sort({createdAt:-1}).lean();
+    const filter=req.authUser.role==='supervisor'?{addedBy:req.authUser.name}:{};
+    const sites = await SiteWork.find(filter).sort({createdAt:-1}).lean();
     res.json(await buildSiteWorkReadResponse(sites));
   } catch(e) { res.status(500).json({ message:e.message }); }
 });
 app.post('/api/sitework', async(req,res)=>{
   const body = { ...req.body };
+  body.addedBy=req.authUser.name;
   delete body.advancePaid;
   const workerValidation = await validateSiteWorkAssignedWorkers(body);
   if (workerValidation) return res.status(400).json({ message: workerValidation });
@@ -1880,15 +1936,15 @@ app.delete('/api/sitework/:id/payments/:index', async(req,res)=>{
 });
 app.post('/api/sitework/:id/completion/submit', async(req,res)=>{
   try {
-    if (req.body.role !== 'supervisor') return res.status(403).json({ message:'Only a supervisor can submit site completion' });
+    if (req.authUser.role !== 'supervisor') return res.status(403).json({ message:'Only a supervisor can submit site completion' });
     const site = await SiteWork.findById(req.params.id);
     if (!site) return res.status(404).json({ message:'Site not found' });
     if (site.status === 'completed') return res.status(400).json({ message:'Site is already finally approved and completed' });
-    if (site.addedBy && req.body.name && site.addedBy !== req.body.name) return res.status(403).json({ message:'You can submit only your own sites' });
+    if (site.addedBy !== req.authUser.name) return res.status(403).json({ message:'You can submit only your own sites' });
     site.status = 'running';
     site.endDate = '';
     site.completionApprovalStatus = 'pending_user';
-    site.completionSubmittedBy = req.body.name || site.addedBy || '';
+    site.completionSubmittedBy = req.authUser.name;
     site.completionSubmittedAt = new Date();
     site.userApprovedBy = '';
     site.userApprovedAt = null;
@@ -1904,7 +1960,8 @@ app.post('/api/sitework/:id/completion/submit', async(req,res)=>{
 });
 app.post('/api/sitework/:id/completion/review', async(req,res)=>{
   try {
-    const { role, name, action } = req.body;
+    const { action } = req.body;
+    const { role, name } = req.authUser;
     if (!['user','admin'].includes(role)) return res.status(403).json({ message:'Only User or Admin can review completion' });
     if (!['approve','reject'].includes(action)) return res.status(400).json({ message:'Approve or reject action is required' });
     const site = await SiteWork.findById(req.params.id);
@@ -1960,7 +2017,7 @@ app.post('/api/sitework/:id/completion/review', async(req,res)=>{
 });
 app.delete('/api/sitework/:id', async(req,res)=>{await SiteWork.findByIdAndDelete(req.params.id);res.json({ok:true});});
 
-app.get('/api/workerreport', async(req,res)=>res.json(await WorkerReport.find().sort({createdAt:-1})));
+app.get('/api/workerreport', async(req,res)=>res.json(await WorkerReport.find(req.authUser.role==='supervisor'?{addedBy:req.authUser.name}:{}).sort({createdAt:-1})));
 app.post('/api/workerreport', async(req,res)=>res.json(await WorkerReport.create(req.body)));
 app.put('/api/workerreport/:id', async(req,res)=>res.json(await WorkerReport.findByIdAndUpdate(req.params.id,req.body,{new:true})));
 
@@ -1999,7 +2056,7 @@ function dailyReportResponse(report) {
 }
 
 app.get('/api/dailyreport', async(req,res)=>{
-  const reports = await DailyReport.find().sort({createdAt:-1});
+  const reports = await DailyReport.find(req.authUser.role==='supervisor'?{addedBy:req.authUser.name}:{}).sort({createdAt:-1});
   res.json(reports.map(dailyReportResponse));
 });
 app.post('/api/dailyreport', async(req,res)=>{
@@ -2077,14 +2134,16 @@ app.delete('/api/dailyreport/:id', async(req,res)=>{
 });
 
 app.get('/api/workplan', async(req,res)=>{
-  const { archive, role } = req.query;
-  const accessRole = role === 'user' ? 'admin' : role;
+  const { archive } = req.query;
+  const accessRole = req.authUser.role === 'user' ? 'admin' : req.authUser.role;
   const cutoff = currentPlanningWindow();
   if (archive === 'true') {
     if (accessRole !== 'admin') return res.status(403).json({ message: 'Archive visible only to Admin' });
     return res.json(await WorkPlan.find({ $or: [{ archived: true }, { date: { $lt: cutoff } }] }).sort({date:-1, createdAt:-1}));
   }
-  res.json(await WorkPlan.find({ archived: { $ne: true }, $or: [{ date: { $gte: cutoff } }, { date: '' }, { date: null }] }).sort({date:-1, createdAt:-1}));
+  const filter={archived: { $ne: true }, $or: [{ date: { $gte: cutoff } }, { date: '' }, { date: null }]};
+  if(req.authUser.role==='supervisor')filter.addedBy=req.authUser.name;
+  res.json(await WorkPlan.find(filter).sort({date:-1, createdAt:-1}));
 });
 app.post('/api/workplan', async(req,res)=>res.json(await WorkPlan.create(req.body)));
 app.put('/api/workplan/:id', async(req,res)=>res.json(await WorkPlan.findByIdAndUpdate(req.params.id,req.body,{new:true})));
@@ -2106,6 +2165,7 @@ function isWorkerActive(worker) {
 app.get('/api/workers', async(req,res)=>{
   const { type, status } = req.query;
   let workers = await Worker.find().sort({name:1}).lean();
+  if(req.authUser.role==='supervisor') workers=workers.map(({_id,name,workerType,workerCategory,status,rate,rateType,rateAmount,workLocationType,paymentType,customPaymentType,loadingRate,unloadingRate})=>({_id,name,workerType,workerCategory,status,rate,rateType,rateAmount,workLocationType,paymentType,customPaymentType,loadingRate,unloadingRate}));
   workers = workers.map(w => ({ ...w, workerType: normalizeWorkerType(w), workerCategory: normalizeWorkerType(w), status: w.status || 'Active' }));
   if (type) workers = workers.filter(w => normalizeWorkerType(w).toLowerCase() === String(type).toLowerCase());
   if (status) workers = workers.filter(w => String(w.status || 'Active').toLowerCase() === String(status).toLowerCase());
@@ -3035,9 +3095,9 @@ app.post('/api/workerpayments', async(req,res)=>{
 
 app.get('/api/driverreports', async(req,res)=>{
   try {
-    const { role, name, driver, mobile, date, fromDate, toDate, category } = req.query;
+    const { driver, mobile, date, fromDate, toDate, category } = req.query;
     const filter = {};
-    if (role === 'driver' && name) filter.driverName = name;
+    if (req.authUser.role === 'driver') filter.driverName = req.authUser.name;
     else if (driver) filter.driverName = { $regex: driver, $options: 'i' };
     if (mobile) filter.driverMobile = normalizeMobile(mobile);
     if (category) filter.category = category;
@@ -3234,6 +3294,7 @@ app.get('/api/purchases', async(req,res)=>{
       if (fromDate) filter.date.$gte = fromDate;
       if (toDate) filter.date.$lte = toDate;
     }
+    if(req.authUser.role==='supervisor')filter.addedBy=req.authUser.name;
     res.json(await Purchase.find(filter).sort({ createdAt: -1 }));
   } catch(e) { res.status(500).json({ message: e.message }); }
 });
@@ -3246,6 +3307,7 @@ app.post('/api/purchases', async(req,res)=>{
     const amountPending = Math.max(0, total - amountPaid);
     const purchase = await Purchase.create({
       ...req.body,
+      addedBy:req.authUser.name,
       supplierMobile: mobile,
       supplierPhone: mobile || req.body.supplierPhone,
       totalAmount: total,
@@ -3294,7 +3356,7 @@ app.delete('/api/purchases/:id', async(req,res)=>{
 
 app.get('/api/company-purchases', async(req,res)=>{
   try {
-    const { role, userName, date, fromDate, toDate } = req.query;
+    const { date, fromDate, toDate } = req.query;
     const filter = {};
     if (date) filter.date = date;
     if (fromDate || toDate) {
@@ -3302,7 +3364,7 @@ app.get('/api/company-purchases', async(req,res)=>{
       if (fromDate) filter.date.$gte = fromDate;
       if (toDate) filter.date.$lte = toDate;
     }
-    if (role === 'supervisor' && userName) filter.purchasedBy = userName;
+    if (req.authUser.role === 'supervisor') filter.purchasedBy = req.authUser.name;
     res.json(await CompanyPurchase.find(filter).sort({ date: -1, createdAt: -1 }).lean());
   } catch(e) { res.status(500).json({ message: e.message }); }
 });
@@ -3320,8 +3382,8 @@ app.post('/api/company-purchases', async(req,res)=>{
       paymentMode: req.body.paymentMode || 'Cash',
       accountName: req.body.accountName || req.body.purchasedBy || '',
       note: req.body.note || '',
-      purchasedBy: req.body.purchasedBy || req.body.addedBy || '',
-      purchasedByRole: req.body.purchasedByRole || req.body.role || '',
+      purchasedBy: req.authUser.name,
+      purchasedByRole: req.authUser.role,
     });
     res.json(purchase);
   } catch(e) { res.status(400).json({ message: e.message }); }
@@ -3895,7 +3957,7 @@ function currentPlanningWindow() {
   app.delete(`/api/masterdata/${type}/:id`, async(req,res)=>{await Model.findByIdAndDelete(req.params.id);res.json({ok:true});});
 });
 
-app.get("/api/suppliers", async(req,res)=>res.json(await Supplier.find().sort({name:1})));
+app.get("/api/suppliers", async(req,res)=>res.json(await Supplier.find(req.authUser.role==='supervisor'?{addedBy:req.authUser.name}:{}).sort({name:1})));
 app.post("/api/suppliers", async(req,res)=>{
   try {
     const data = { ...req.body };
@@ -4418,10 +4480,12 @@ const Device = mongoose.model("Device", DeviceSchema);
 
 app.get("/api/devices", async(req,res)=>res.json(await Device.find().sort({createdAt:-1})));
 app.post("/api/devices/check", async(req,res)=>{
-  const {deviceId,username} = req.body;
+  const {deviceId} = req.body;
+  const {username,name,role} = req.authUser;
+  if(!deviceId)return res.status(400).json({message:'Device identity is required'});
   let device = await Device.findOne({deviceId,username});
   if (!device) {
-    device = await Device.create({...req.body, status:"pending"});
+    device = await Device.create({deviceId,username,name,role,deviceName:String(req.body.deviceName||'').slice(0,100),browser:String(req.body.browser||'').slice(0,200),loginTime:new Date().toISOString(),status:"pending"});
     return res.json({status:"pending"});
   }
   res.json({status:device.status});
@@ -4572,7 +4636,9 @@ function paymentKind(type) {
 
 app.get('/api/cashflow', async(req,res)=>{
   try {
-    const { role, name, personRole, person, fromDate, toDate } = req.query;
+    const { personRole, person, fromDate, toDate } = req.query;
+    const role=req.authUser.role;
+    const name=req.authUser.name;
     if (!['admin', 'supervisor', 'user'].includes(role)) {
       return res.status(400).json({ message: 'Valid role is required' });
     }
