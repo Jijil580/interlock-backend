@@ -41,7 +41,7 @@ DailyReportSchema.index({ siteName:1, date:-1 });
 DailyReportSchema.index({ 'workerEntries.workerName':1, date:-1 });
 const WorkPlanSchema = new mongoose.Schema({ date:String, siteName:String, task:String, workers:String, materials:String, note:String, status:{type:String,default:'planned'}, fromDate:String, toDate:String, site:String, plannedWork:String, supervisor:String, workersAllocated:String, materialsNeeded:String, estimatedCost:Number, paymentPlan:String, notes:String, archived:{type:Boolean,default:false}, addedBy:String }, {timestamps:true});
 const WorkerSchema = new mongoose.Schema({ name:String, phone:String, address:String, role:String, workerType:String, workerCategory:String, status:{type:String,default:'Active'}, workLocationType:String, paymentType:String, customPaymentType:String, rateType:String, rateAmount:Number, totalProduction:{type:Number,default:0}, totalEarnings:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
-const WorkerPaymentSchema = new mongoose.Schema({ workerId:String, workerName:String, personType:String, amount:Number, cashAmount:Number, advanceAdjusted:Number, date:String, paidAt:Date, mode:String, note:String, addedBy:String, source:String, reportDate:String, paymentScope:String, weekStart:String, weekEnd:String }, {timestamps:true});
+const WorkerPaymentSchema = new mongoose.Schema({ workerId:String, workerName:String, personType:String, siteName:String, amount:Number, cashAmount:Number, advanceAdjusted:Number, date:String, paidAt:Date, mode:String, note:String, addedBy:String, source:String, reportDate:String, paymentScope:String, weekStart:String, weekEnd:String }, {timestamps:true});
 WorkerPaymentSchema.index({ source:1, workerName:1 });
 WorkerPaymentSchema.index({ date:-1, source:1 });
 const PurchaseSchema = new mongoose.Schema({ date:String, supplierName:String, supplierPhone:String, supplierMobile:String, supplierAddress:String, itemName:String, itemType:String, quantity:String, unit:String, unitPrice:String, totalAmount:Number, amountPaid:{type:Number,default:0}, amountPending:{type:Number,default:0}, paymentMode:String, vehicleNumber:String, vehicleType:String, driverName:String, driverPhone:String, deliveryAddress:String, note:String, addedBy:String, source:String, sourceId:String }, {timestamps:true});
@@ -1101,6 +1101,7 @@ app.get('/api/salary-payment-ledger', async(req,res)=>{
         givenBy:payment.addedBy || '', date:payment.date || '', dateTime:payment.paidAt || payment.createdAt || payment.updatedAt,
         amount:+(payment.amount) || 0, cashAmount:+(payment.cashAmount ?? payment.amount) || 0, advanceAdjusted:+(payment.advanceAdjusted) || 0,
         mode:payment.mode || 'Cash', note:payment.note || '', source:finalType === 'site-worker' ? 'Site Worker Salary' : 'Production Worker Salary',
+        siteName:payment.siteName || '',
         paymentScope:payment.paymentScope || 'all', weekStart:payment.weekStart || '', weekEnd:payment.weekEnd || '',
       });
     });
@@ -2685,13 +2686,20 @@ async function buildSiteWorkerReport(workerName, filters = {}) {
     siteMap[sk].entries.push(row);
   });
 
-  const manualPayments = await WorkerPayment.find({ workerName, source: 'worker-ledger-site' }).sort({ date: -1, createdAt: -1 });
+  const paymentFilter = { workerName, source: 'worker-ledger-site' };
+  applyDateFilter(paymentFilter, filters);
+  if (filters.site) paymentFilter.siteName = { $regex: filters.site, $options: 'i' };
+  if (permittedSupervisorSiteIds) {
+    paymentFilter.siteName = { $in: [...new Set(reports.map(report => report.siteName).filter(Boolean))] };
+  }
+  const manualPayments = await WorkerPayment.find(paymentFilter).sort({ date: -1, createdAt: -1 }).lean();
   manualPayments.forEach(p => {
+    const siteName = p.siteName || 'Unassigned';
     history.push({
       _id: p._id,
       date: p.date,
       workerName,
-      siteName: 'Worker Payment',
+      siteName,
       dutyArea: '-',
       workDone: 'Worker wage payment',
       workCategory: 'Payment',
@@ -2708,6 +2716,13 @@ async function buildSiteWorkerReport(workerName, filters = {}) {
       addedBy: p.addedBy || '',
       remarks: p.note || '',
     });
+    if (p.siteName) {
+      if (!siteMap[siteName]) {
+        siteMap[siteName] = { siteName, categories:new Set(), dutyAreas:new Set(), workDone:[], totalArea:0, totalEarned:0, totalPaid:0, unit:'—', rate:0, entries:[] };
+      }
+      siteMap[siteName].totalPaid += +(p.amount) || 0;
+      siteMap[siteName].entries.push(history[history.length - 1]);
+    }
   });
 
   history.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
@@ -2903,16 +2918,20 @@ async function buildWorkerWeeklySalary(worker, workerType, asOf = indiaDateStrin
     dispatchRows.forEach(row=>earningRows.push({ date:row.date, earned:+(row.totalAmount)||0, paid:+(row.paymentGiven)||0 }));
   } else {
     const [dailyRows, dispatchRows] = await Promise.all([
-      DailyReport.find({ 'workerEntries.workerName':worker.name }).select('date workerEntries').lean(),
-      LoadingOperation.find({ workerName:worker.name, workerType:'site-worker' }).select('date totalAmount paymentGiven').lean(),
+      DailyReport.find({ 'workerEntries.workerName':worker.name }).select('date siteName workerEntries').lean(),
+      LoadingOperation.find({ workerName:worker.name, workerType:'site-worker' }).select('date siteName totalAmount paymentGiven').lean(),
     ]);
     dailyRows.forEach(report=>(report.workerEntries||[]).forEach(entry=>{
       if (entry.workerName !== worker.name) return;
       const normalized = normalizeWorkerEntry(entry);
-      earningRows.push({ date:report.date, earned:normalized.amountEarned, paid:normalized.paymentGiven });
+      earningRows.push({ date:report.date, siteName:report.siteName || '', earned:normalized.amountEarned, paid:normalized.paymentGiven });
     }));
-    dispatchRows.forEach(row=>earningRows.push({ date:row.date, earned:+(row.totalAmount)||0, paid:+(row.paymentGiven)||0 }));
+    dispatchRows.forEach(row=>earningRows.push({ date:row.date, siteName:row.siteName || '', earned:+(row.totalAmount)||0, paid:+(row.paymentGiven)||0 }));
   }
+
+  const siteNames = workerType === 'Site Worker'
+    ? [...new Set(earningRows.map(row=>String(row.siteName||'').trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b))
+    : [];
 
   const buckets = new Map();
   const ensureBucket = (weekStart) => {
@@ -2960,6 +2979,7 @@ async function buildWorkerWeeklySalary(worker, workerType, asOf = indiaDateStrin
     worker:{ _id:worker._id, name:worker.name, phone:worker.phone||'', workerType, totalEarnings:+(worker.totalEarnings)||0, totalPaid:+(worker.totalPaid)||0, totalPending:+(worker.totalPending)||0 },
     currentWeek,
     previousWeeks,
+    siteNames,
     previousWeeksPending:previousWeeks.reduce((sum,week)=>sum+week.pending,0),
     calculatedPending:weeks.reduce((sum,week)=>sum+week.pending,0),
   };
@@ -2989,11 +3009,14 @@ app.get('/api/workers/weekly-salary', async(req,res)=>{
 app.get('/api/workerpayments', async(req,res)=>res.json(await WorkerPayment.find().sort({date:-1})));
 app.post('/api/workerpayments', async(req,res)=>{
   try {
-    const { workerName, date, mode, note, addedBy, source, paymentScope = 'all', weekStart = '', weekEnd = '' } = req.body;
+    const { workerName, date, mode, note, addedBy, source, siteName = '', paymentScope = 'all', weekStart = '', weekEnd = '' } = req.body;
     if (!workerName) return res.status(400).json({ message: 'Worker name is required' });
     const worker = req.body.workerId ? await Worker.findById(req.body.workerId).catch(()=>null) : await Worker.findOne({ name:workerName });
     if (!worker) return res.status(404).json({ message: 'Worker not found' });
     const personType = req.body.personType || (String(source || '').includes('site') ? 'site-worker' : 'production-worker');
+    if (personType === 'site-worker' && String(source || '').includes('site') && !String(siteName).trim()) {
+      return res.status(400).json({ message: 'Select the site this salary payment is for' });
+    }
     const workerType = personType === 'site-worker' ? 'Site Worker' : 'Production Worker';
     const weekly = await buildWorkerWeeklySalary(worker, workerType, indiaDateString());
     let targetPending = weekly.calculatedPending;
@@ -3005,6 +3028,13 @@ app.post('/api/workerpayments', async(req,res)=>{
     if (cashAmount > targetPending + 0.005) return res.status(400).json({ message: `Payment cannot exceed the selected pending amount of ${targetPending.toFixed(2)}` });
     const remainingPending = Math.max(0, targetPending - cashAmount);
     const requestedAdvance = Math.min(remainingPending, Math.max(0, +(req.body.advanceRequested) || 0));
+    if (personType === 'site-worker' && String(source || '').includes('site')) {
+      const siteReport = await buildSiteWorkerReport(workerName, { site: String(siteName).trim() });
+      const sitePending = siteReport.sites.find(site => site.siteName === String(siteName).trim())?.pending || 0;
+      if (cashAmount + requestedAdvance > sitePending + 0.005) {
+        return res.status(400).json({ message: `Payment cannot exceed ${String(siteName).trim()} pending of ${sitePending.toFixed(2)}` });
+      }
+    }
     const advance = await consumeSalaryAdvance({
       personType,
       personId: worker?._id,
@@ -3020,7 +3050,7 @@ app.post('/api/workerpayments', async(req,res)=>{
     const targetWeekStart = paymentScope === 'current-week' ? weekly.currentWeek.weekStart : weekStart;
     const targetWeekEnd = paymentScope === 'current-week' ? weekly.currentWeek.weekEnd : (weekEnd || (targetWeekStart ? shiftDateString(targetWeekStart,6) : ''));
     const payment = await recordWorkerPayment(workerName, paymentAmount, date || indiaDateString(), source || 'worker-payment', addedBy, note, mode || 'Cash', {
-      workerId:String(worker._id), personType, cashAmount, advanceAdjusted:advance.used,
+      workerId:String(worker._id), personType, siteName:String(siteName).trim(), cashAmount, advanceAdjusted:advance.used,
       paymentScope, weekStart:targetWeekStart, weekEnd:targetWeekEnd,
     });
     res.json(payment);
