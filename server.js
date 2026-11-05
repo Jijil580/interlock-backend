@@ -3081,10 +3081,11 @@ app.post('/api/workerpayments', async(req,res)=>{
     const personType = req.body.personType || (String(source || '').includes('site') ? 'site-worker' : 'production-worker');
     const isSiteSalary = personType === 'site-worker' && String(source || '').includes('site');
     const normalizedSiteName = String(siteName || '').trim();
+    const isUnassignedCurrentWeekSalary = isSiteSalary && paymentScope === 'current-week' && !normalizedSiteName;
     if (isSiteSalary && !['current-week','selected-week'].includes(paymentScope)) {
       return res.status(400).json({ message: 'Choose a current or historical site/week balance for this payment' });
     }
-    if (isSiteSalary && (!normalizedSiteName || normalizedSiteName.toLowerCase() === 'unknown')) {
+    if (isSiteSalary && !isUnassignedCurrentWeekSalary && (!normalizedSiteName || normalizedSiteName.toLowerCase() === 'unknown')) {
       return res.status(400).json({ message: 'Select the site this salary payment is for' });
     }
     const workerType = personType === 'site-worker' ? 'Site Worker' : 'Production Worker';
@@ -3092,7 +3093,9 @@ app.post('/api/workerpayments', async(req,res)=>{
     let targetPending = weekly.calculatedPending;
     let targetWeekStart = paymentScope === 'current-week' ? weekly.currentWeek.weekStart : weekStart;
     let targetWeekEnd = paymentScope === 'current-week' ? weekly.currentWeek.weekEnd : (weekEnd || (targetWeekStart ? shiftDateString(targetWeekStart,6) : ''));
-    if (isSiteSalary) {
+    if (isUnassignedCurrentWeekSalary) {
+      targetPending = weekly.currentWeekUnassignedPending || 0;
+    } else if (isSiteSalary) {
       const siteWeek = (paymentScope === 'current-week' ? weekly.currentWeekSites : weekly.previousWeekSites)
         .find(site => site.siteName === normalizedSiteName && site.weekStart === targetWeekStart);
       if (paymentScope === 'selected-week' && (!targetWeekStart || targetWeekStart >= weekly.currentWeek.weekStart)) {
@@ -3105,7 +3108,7 @@ app.post('/api/workerpayments', async(req,res)=>{
     } else if (paymentScope === 'current-week') targetPending = weekly.currentWeek.pending;
     else if (paymentScope === 'previous-weeks') targetPending = weekly.previousWeeksPending;
     else if (paymentScope === 'selected-week') targetPending = weekly.previousWeeks.find(row=>row.weekStart===weekStart)?.pending || 0;
-    if (targetPending <= 0) return res.status(400).json({ message: isSiteSalary ? `No pending amount is available for ${normalizedSiteName} in the selected week` : 'No pending amount is available for the selected week' });
+    if (targetPending <= 0) return res.status(400).json({ message: isUnassignedCurrentWeekSalary ? 'No unassigned current-week pending amount is available' : isSiteSalary ? `No pending amount is available for ${normalizedSiteName} in the selected week` : 'No pending amount is available for the selected week' });
     const cashAmount = Math.max(0, +(req.body.amount) || 0);
     if (cashAmount > targetPending + 0.005) return res.status(400).json({ message: `Payment cannot exceed the selected pending amount of ${targetPending.toFixed(2)}` });
     const remainingPending = Math.max(0, targetPending - cashAmount);
