@@ -38,6 +38,7 @@ const DailyReportSchema = new mongoose.Schema({ date:String, entrySection:{type:
 DailyReportSchema.index({ siteId:1, date:-1 });
 DailyReportSchema.index({ date:-1, createdAt:-1 });
 DailyReportSchema.index({ siteName:1, date:-1 });
+DailyReportSchema.path('workerEntries').schema.add({ siteId:String, siteName:String });
 DailyReportSchema.index({ 'workerEntries.workerName':1, date:-1 });
 const WorkPlanSchema = new mongoose.Schema({ date:String, siteName:String, task:String, workers:String, materials:String, note:String, status:{type:String,default:'planned'}, fromDate:String, toDate:String, site:String, plannedWork:String, supervisor:String, workersAllocated:String, materialsNeeded:String, estimatedCost:Number, paymentPlan:String, notes:String, archived:{type:Boolean,default:false}, addedBy:String }, {timestamps:true});
 const WorkerSchema = new mongoose.Schema({ name:String, phone:String, address:String, role:String, workerType:String, workerCategory:String, status:{type:String,default:'Active'}, workLocationType:String, paymentType:String, customPaymentType:String, rateType:String, rateAmount:Number, totalProduction:{type:Number,default:0}, totalEarnings:{type:Number,default:0}, totalPaid:{type:Number,default:0}, totalPending:{type:Number,default:0}, addedBy:String }, {timestamps:true});
@@ -1963,7 +1964,7 @@ const DAILY_REPORT_SECTIONS = new Set(['site','workers','expenses','office']);
 
 function inferDailyReportSections(source = {}) {
   const report = source?.toObject ? source.toObject() : source;
-  if (DAILY_REPORT_SECTIONS.has(report.entrySection)) return [report.entrySection];
+  if (DAILY_REPORT_SECTIONS.has(report.entrySection)) return [...new Set([report.entrySection,...((report.workerEntries||[]).length?['workers']:[])])];
 
   const sections = [];
   const paymentKinds = (report.payments || []).map(payment => String(payment?.type || '').trim().toLowerCase());
@@ -2142,7 +2143,7 @@ function normalizeDailyReportBody(body = {}) {
   const normalized = {
     ...body,
     payments: (body.payments || []).filter(p => p.type !== 'Worker Payment'),
-    workerEntries: (body.workerEntries || []).map(normalizeWorkerEntry)
+    workerEntries: (body.workerEntries || []).map(entry=>normalizeWorkerEntry({...entry,siteId:entry.siteId||body.siteId||'',siteName:entry.siteName||body.siteName||''}))
   };
   delete normalized.entrySections;
   if (!DAILY_REPORT_SECTIONS.has(normalized.entrySection)) delete normalized.entrySection;
@@ -2182,11 +2183,18 @@ async function findDuplicateWorkerEntry(report, excludeId) {
 async function validateDailyReportSiteWorkers(report, historicalWorkerNames = []) {
   const entries = (report.workerEntries || []).filter(we => we.workerName);
   if (!entries.length) return null;
-  const site = report.siteId ? await SiteWork.findById(report.siteId).lean() : await SiteWork.findOne({ customerName: report.siteName }).lean();
-  if (!site) return null;
-  const assigned = new Set((site.selectedWorkers || []).map(name => normKey(name)));
   const historical = new Set(historicalWorkerNames.map(name => normKey(name)));
   for (const entry of entries) {
+    const siteId = entry.siteId || report.siteId;
+    const siteName = entry.siteName || report.siteName;
+    const site = siteId ? await SiteWork.findById(siteId).lean() : await SiteWork.findOne({customerName:siteName}).lean();
+    if (!site) {
+      if (historical.has(normKey(entry.workerName))) continue;
+      return 'Select a valid site for each worker entry.';
+    }
+    entry.siteId = String(site._id);
+    entry.siteName = site.customerName;
+    const assigned = new Set((site.selectedWorkers || []).map(name => normKey(name)));
     // Keep historical rows editable when the current site assignment changes.
     // A newly introduced worker must still satisfy the current assignment rules.
     if (historical.has(normKey(entry.workerName))) continue;
@@ -2588,17 +2596,17 @@ async function buildSiteWorkerReport(workerName, filters = {}) {
   const siteMap = {};
 
   reports.forEach(r => {
-    if (filters.site && !(r.siteName || '').toLowerCase().includes(filters.site.toLowerCase())) return;
-
     (r.workerEntries || []).forEach(we => {
       if (we.workerName !== workerName) return;
+      const siteName = we.siteName || r.siteName;
+      if (filters.site && !(siteName || '').toLowerCase().includes(filters.site.toLowerCase())) return;
       if (filters.item && !(we.workCategory || '').toLowerCase().includes(filters.item.toLowerCase())) return;
 
       const normalized = normalizeWorkerEntry(we);
       const earned = normalized.amountEarned;
       const paid = normalized.paymentGiven;
       const row = {
-        date: r.date, workerName, siteName: r.siteName, dutyArea: we.dutyArea || '',
+        date: r.date, workerName, siteName, dutyArea: we.dutyArea || '',
         workDone: we.workDone || '', workCategory: we.workCategory || '',
         workArea: normalized.workArea, unit: we.unit || '', rate: normalized.rate,
         amountEarned: earned, paymentGiven: paid,
@@ -2607,7 +2615,7 @@ async function buildSiteWorkerReport(workerName, filters = {}) {
       };
       history.push(row);
 
-      const sk = r.siteName || 'Unknown';
+      const sk = siteName || 'Unknown';
       if (!siteMap[sk]) {
         siteMap[sk] = {
           siteName: sk, categories: new Set(), dutyAreas: new Set(),
@@ -2800,7 +2808,7 @@ async function buildSiteWorkerReportList(filters = {}) {
   ]});
   if (dispatchRestrictions.length) dispatchFilter.$and = dispatchRestrictions;
 
-  if (filters.site) reportFilter.siteName = {$regex:escapeRegex(filters.site),$options:'i'};
+  if (filters.site) reportFilter.$and = [...(reportFilter.$and||[]),{$or:[{siteName:{$regex:escapeRegex(filters.site),$options:'i'}},{'workerEntries.siteName':{$regex:escapeRegex(filters.site),$options:'i'}}]}];
   reportFilter['workerEntries.workerName'] = {$in:workerNames};
   const [reports, dispatchEntries, manualPayments] = await Promise.all([
     DailyReport.find(reportFilter).select('date siteName siteId addedBy workerEntries').sort({date:-1}).lean(),
@@ -2812,12 +2820,13 @@ async function buildSiteWorkerReportList(filters = {}) {
     totalSites:new Set(),totalAreaCompleted:0,totalEarnings:0,totalPaid:0,
   }]));
   for (const report of reports) {
-    if (filters.site && !(report.siteName||'').toLowerCase().includes(filters.site.toLowerCase())) continue;
     for (const entry of report.workerEntries || []) {
+      const siteName = entry.siteName || report.siteName;
+      if (filters.site && !(siteName||'').toLowerCase().includes(filters.site.toLowerCase())) continue;
       const totals = totalsByWorker.get(entry.workerName);
       if (!totals || (filters.item && !(entry.workCategory||'').toLowerCase().includes(filters.item.toLowerCase()))) continue;
       const normalized = normalizeWorkerEntry(entry);
-      totals.totalSites.add(report.siteName);
+      totals.totalSites.add(siteName);
       totals.totalAreaCompleted += normalized.workArea;
       totals.totalEarnings += normalized.amountEarned;
       totals.totalPaid += normalized.paymentGiven;
@@ -2925,9 +2934,9 @@ async function buildWorkerWeeklySalary(worker, workerType, asOf = indiaDateStrin
       DailyReport.find({ 'workerEntries.workerName':worker.name }).select('date siteName siteId runningSite newSite workerEntries').lean(),
       LoadingOperation.find({ workerName:worker.name, workerType:'site-worker' }).select('date siteName siteId totalAmount paymentGiven').lean(),
     ]);
-    const siteIds = [...new Set([...dailyRows, ...dispatchRows].map(row=>String(row.siteId||'')).filter(id=>mongoose.isValidObjectId(id)))];
+    const siteIds = [...new Set([...dailyRows, ...dailyRows.flatMap(row=>row.workerEntries||[]), ...dispatchRows].map(row=>String(row.siteId||'')).filter(id=>mongoose.isValidObjectId(id)))];
     const siteCandidates = [...new Set([
-      ...dailyRows.flatMap(row=>[row.siteName,row.runningSite,row.newSite]),
+      ...dailyRows.flatMap(row=>[row.siteName,row.runningSite,row.newSite,...(row.workerEntries||[]).map(entry=>entry.siteName)]),
       ...dispatchRows.map(row=>row.siteName),
     ].filter(isUsableSalarySite).map(value=>String(value).trim()))];
     const sites = await SiteWork.find({ $or:[{ _id:{ $in:siteIds } },{ customerName:{ $in:siteCandidates } }] }).select('_id customerName').lean();
@@ -2936,10 +2945,10 @@ async function buildWorkerWeeklySalary(worker, workerType, asOf = indiaDateStrin
     dailyRows.forEach(report=>(report.workerEntries||[]).forEach(entry=>{
       if (entry.workerName !== worker.name) return;
       const normalized = normalizeWorkerEntry(entry);
-      const candidates = [report.siteName, report.runningSite, report.newSite].filter(isUsableSalarySite).map(value=>String(value).trim());
-      const siteName = siteNameById.get(String(report.siteId||''))
+      const candidates = [entry.siteName, report.siteName, report.runningSite, report.newSite].filter(isUsableSalarySite).map(value=>String(value).trim());
+      const siteName = siteNameById.get(String(entry.siteId||report.siteId||''))
         || candidates.map(value=>siteNameByNormalizedName.get(value.toLowerCase())).find(Boolean)
-        || (isUsableSalarySite(report.siteName) ? String(report.siteName).trim() : '');
+        || candidates[0] || '';
       earningRows.push({ date:report.date, siteName, earned:normalized.amountEarned, paid:normalized.paymentGiven });
     }));
     dispatchRows.forEach(row=>{
