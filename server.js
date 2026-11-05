@@ -3016,6 +3016,25 @@ async function buildWorkerWeeklySalary(worker, workerType, asOf = indiaDateStrin
     ? ['worker-ledger-site','worker-payment','manual']
     : ['worker-ledger-production','worker-payment','manual'];
   const manualPayments = await WorkerPayment.find({ workerName:worker.name, source:{ $in:manualSources } }).sort({ date:1, createdAt:1 }).lean();
+  const siteWeekBalances = new Map();
+  if (workerType === 'Site Worker') {
+    earningRows.forEach(row=>{
+      const siteName = String(row.siteName||'').trim();
+      if (!siteName || siteName.toLowerCase() === 'unknown' || !/^\d{4}-\d{2}-\d{2}$/.test(String(row.date||''))) return;
+      const range = salaryWeekRange(row.date);
+      const key = `${range.start}::${siteName}`;
+      const site = siteWeekBalances.get(key) || { siteKey:key, siteName, weekStart:range.start, weekEnd:range.end, earned:0, paid:0 };
+      site.earned += Math.max(0, +(row.earned)||0);
+      site.paid += Math.max(0, +(row.paid)||0);
+      siteWeekBalances.set(key, site);
+    });
+    manualPayments.forEach(payment=>{
+      const siteName = String(payment.siteName||'').trim();
+      if (!siteName || siteName.toLowerCase() === 'unknown' || !payment.weekStart) return;
+      const site = siteWeekBalances.get(`${payment.weekStart}::${siteName}`);
+      if (site) site.paid += Math.max(0, +(payment.amount)||0);
+    });
+  }
   manualPayments.forEach(payment=>{
     const amount = Math.max(0, +(payment.amount)||0);
     if (!amount) return;
@@ -3038,9 +3057,16 @@ async function buildWorkerWeeklySalary(worker, workerType, asOf = indiaDateStrin
   })).sort((a,b)=>b.weekStart.localeCompare(a.weekStart));
   const currentWeek = weeks.find(week=>week.isCurrent) || { weekStart:current.start, weekEnd:current.end, earned:0, paid:0, pending:0, isCurrent:true };
   const previousWeeks = weeks.filter(week=>week.weekStart<current.start && week.earned>0);
+  const siteWeekRows = [...siteWeekBalances.values()].map(site=>({
+    ...site,
+    paid:Math.min(site.earned,site.paid),
+    pending:Math.max(0,site.earned-site.paid),
+  })).filter(site=>site.pending>0).sort((a,b)=>b.weekStart.localeCompare(a.weekStart)||a.siteName.localeCompare(b.siteName));
   return {
     worker:{ _id:worker._id, name:worker.name, phone:worker.phone||'', workerType, totalEarnings:+(worker.totalEarnings)||0, totalPaid:+(worker.totalPaid)||0, totalPending:+(worker.totalPending)||0 },
     currentWeek,
+    currentWeekSites:siteWeekRows.filter(site=>site.weekStart===current.start),
+    previousWeekSites:siteWeekRows.filter(site=>site.weekStart<current.start),
     previousWeeks,
     siteNames,
     previousWeeksPending:previousWeeks.reduce((sum,week)=>sum+week.pending,0),
@@ -3077,26 +3103,39 @@ app.post('/api/workerpayments', async(req,res)=>{
     const worker = req.body.workerId ? await Worker.findById(req.body.workerId).catch(()=>null) : await Worker.findOne({ name:workerName });
     if (!worker) return res.status(404).json({ message: 'Worker not found' });
     const personType = req.body.personType || (String(source || '').includes('site') ? 'site-worker' : 'production-worker');
-    if (personType === 'site-worker' && String(source || '').includes('site') && !String(siteName).trim()) {
+    const isSiteSalary = personType === 'site-worker' && String(source || '').includes('site');
+    const normalizedSiteName = String(siteName || '').trim();
+    if (isSiteSalary && !['current-week','selected-week'].includes(paymentScope)) {
+      return res.status(400).json({ message: 'Choose a current or historical site/week balance for this payment' });
+    }
+    if (isSiteSalary && (!normalizedSiteName || normalizedSiteName.toLowerCase() === 'unknown')) {
       return res.status(400).json({ message: 'Select the site this salary payment is for' });
     }
     const workerType = personType === 'site-worker' ? 'Site Worker' : 'Production Worker';
     const weekly = await buildWorkerWeeklySalary(worker, workerType, indiaDateString());
     let targetPending = weekly.calculatedPending;
-    if (paymentScope === 'current-week') targetPending = weekly.currentWeek.pending;
+    let targetWeekStart = paymentScope === 'current-week' ? weekly.currentWeek.weekStart : weekStart;
+    let targetWeekEnd = paymentScope === 'current-week' ? weekly.currentWeek.weekEnd : (weekEnd || (targetWeekStart ? shiftDateString(targetWeekStart,6) : ''));
+    if (isSiteSalary) {
+      const siteWeek = (paymentScope === 'current-week' ? weekly.currentWeekSites : weekly.previousWeekSites)
+        .find(site => site.siteName === normalizedSiteName && site.weekStart === targetWeekStart);
+      if (paymentScope === 'selected-week' && (!targetWeekStart || targetWeekStart >= weekly.currentWeek.weekStart)) {
+        return res.status(400).json({ message: 'Select a completed historical week for this site payment' });
+      }
+      if (siteWeek && paymentScope === 'selected-week' && targetWeekEnd !== siteWeek.weekEnd) {
+        return res.status(400).json({ message: 'The selected site/week does not match the available pending balance' });
+      }
+      targetPending = siteWeek?.pending || 0;
+    } else if (paymentScope === 'current-week') targetPending = weekly.currentWeek.pending;
     else if (paymentScope === 'previous-weeks') targetPending = weekly.previousWeeksPending;
     else if (paymentScope === 'selected-week') targetPending = weekly.previousWeeks.find(row=>row.weekStart===weekStart)?.pending || 0;
-    if (targetPending <= 0) return res.status(400).json({ message: 'No pending amount is available for the selected week' });
+    if (targetPending <= 0) return res.status(400).json({ message: isSiteSalary ? `No pending amount is available for ${normalizedSiteName} in the selected week` : 'No pending amount is available for the selected week' });
     const cashAmount = Math.max(0, +(req.body.amount) || 0);
     if (cashAmount > targetPending + 0.005) return res.status(400).json({ message: `Payment cannot exceed the selected pending amount of ${targetPending.toFixed(2)}` });
     const remainingPending = Math.max(0, targetPending - cashAmount);
     const requestedAdvance = Math.min(remainingPending, Math.max(0, +(req.body.advanceRequested) || 0));
-    if (personType === 'site-worker' && String(source || '').includes('site')) {
-      const siteReport = await buildSiteWorkerReport(workerName, { site: String(siteName).trim() });
-      const sitePending = siteReport.sites.find(site => site.siteName === String(siteName).trim())?.pending || 0;
-      if (cashAmount + requestedAdvance > sitePending + 0.005) {
-        return res.status(400).json({ message: `Payment cannot exceed ${String(siteName).trim()} pending of ${sitePending.toFixed(2)}` });
-      }
+    if (isSiteSalary && cashAmount + requestedAdvance > targetPending + 0.005) {
+      return res.status(400).json({ message: `Payment cannot exceed ${normalizedSiteName} selected site/week pending of ${targetPending.toFixed(2)}` });
     }
     const advance = await consumeSalaryAdvance({
       personType,
@@ -3110,10 +3149,8 @@ app.post('/api/workerpayments', async(req,res)=>{
     });
     const paymentAmount = cashAmount + advance.used;
     if (paymentAmount <= 0) return res.status(400).json({ message: 'Cash amount or available advance is required' });
-    const targetWeekStart = paymentScope === 'current-week' ? weekly.currentWeek.weekStart : weekStart;
-    const targetWeekEnd = paymentScope === 'current-week' ? weekly.currentWeek.weekEnd : (weekEnd || (targetWeekStart ? shiftDateString(targetWeekStart,6) : ''));
     const payment = await recordWorkerPayment(workerName, paymentAmount, date || indiaDateString(), source || 'worker-payment', addedBy, note, mode || 'Cash', {
-      workerId:String(worker._id), personType, siteName:String(siteName).trim(), cashAmount, advanceAdjusted:advance.used,
+      workerId:String(worker._id), personType, siteName:normalizedSiteName, cashAmount, advanceAdjusted:advance.used,
       paymentScope, weekStart:targetWeekStart, weekEnd:targetWeekEnd,
     });
     res.json(payment);
