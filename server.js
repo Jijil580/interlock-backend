@@ -2908,6 +2908,10 @@ async function buildWorkerWeeklySalary(worker, workerType, asOf = indiaDateStrin
   const personType = workerType === 'Site Worker' ? 'site-worker' : 'production-worker';
   const current = salaryWeekRange(asOf);
   const earningRows = [];
+  const isUsableSalarySite = value => {
+    const normalized = String(value || '').trim().toLowerCase();
+    return Boolean(normalized) && !['-', '—', 'unknown', 'n/a', 'na', 'null', 'undefined'].includes(normalized);
+  };
 
   if (workerType === 'Production Worker') {
     const [productionRows, dispatchRows] = await Promise.all([
@@ -2918,19 +2922,34 @@ async function buildWorkerWeeklySalary(worker, workerType, asOf = indiaDateStrin
     dispatchRows.forEach(row=>earningRows.push({ date:row.date, earned:+(row.totalAmount)||0, paid:+(row.paymentGiven)||0 }));
   } else {
     const [dailyRows, dispatchRows] = await Promise.all([
-      DailyReport.find({ 'workerEntries.workerName':worker.name }).select('date siteName workerEntries').lean(),
-      LoadingOperation.find({ workerName:worker.name, workerType:'site-worker' }).select('date siteName totalAmount paymentGiven').lean(),
+      DailyReport.find({ 'workerEntries.workerName':worker.name }).select('date siteName siteId runningSite newSite workerEntries').lean(),
+      LoadingOperation.find({ workerName:worker.name, workerType:'site-worker' }).select('date siteName siteId totalAmount paymentGiven').lean(),
     ]);
+    const siteIds = [...new Set([...dailyRows, ...dispatchRows].map(row=>String(row.siteId||'')).filter(id=>mongoose.isValidObjectId(id)))];
+    const siteCandidates = [...new Set([
+      ...dailyRows.flatMap(row=>[row.siteName,row.runningSite,row.newSite]),
+      ...dispatchRows.map(row=>row.siteName),
+    ].filter(isUsableSalarySite).map(value=>String(value).trim()))];
+    const sites = await SiteWork.find({ $or:[{ _id:{ $in:siteIds } },{ customerName:{ $in:siteCandidates } }] }).select('_id customerName').lean();
+    const siteNameById = new Map(sites.map(site=>[String(site._id),String(site.customerName||'').trim()]));
+    const siteNameByNormalizedName = new Map(sites.map(site=>[String(site.customerName||'').trim().toLowerCase(),String(site.customerName||'').trim()]));
     dailyRows.forEach(report=>(report.workerEntries||[]).forEach(entry=>{
       if (entry.workerName !== worker.name) return;
       const normalized = normalizeWorkerEntry(entry);
-      earningRows.push({ date:report.date, siteName:report.siteName || '', earned:normalized.amountEarned, paid:normalized.paymentGiven });
+      const candidates = [report.siteName, report.runningSite, report.newSite].filter(isUsableSalarySite).map(value=>String(value).trim());
+      const siteName = siteNameById.get(String(report.siteId||''))
+        || candidates.map(value=>siteNameByNormalizedName.get(value.toLowerCase())).find(Boolean)
+        || (isUsableSalarySite(report.siteName) ? String(report.siteName).trim() : '');
+      earningRows.push({ date:report.date, siteName, earned:normalized.amountEarned, paid:normalized.paymentGiven });
     }));
-    dispatchRows.forEach(row=>earningRows.push({ date:row.date, siteName:row.siteName || '', earned:+(row.totalAmount)||0, paid:+(row.paymentGiven)||0 }));
+    dispatchRows.forEach(row=>{
+      const siteName = isUsableSalarySite(row.siteName) ? String(row.siteName).trim() : siteNameById.get(String(row.siteId||'')) || '';
+      earningRows.push({ date:row.date, siteName, earned:+(row.totalAmount)||0, paid:+(row.paymentGiven)||0 });
+    });
   }
 
   const siteNames = workerType === 'Site Worker'
-    ? [...new Set(earningRows.map(row=>String(row.siteName||'').trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b))
+    ? [...new Set(earningRows.map(row=>String(row.siteName||'').trim()).filter(isUsableSalarySite))].sort((a,b)=>a.localeCompare(b))
     : [];
 
   const buckets = new Map();
@@ -2957,32 +2976,50 @@ async function buildWorkerWeeklySalary(worker, workerType, asOf = indiaDateStrin
   if (workerType === 'Site Worker') {
     earningRows.forEach(row=>{
       const siteName = String(row.siteName||'').trim();
-      if (!siteName || siteName.toLowerCase() === 'unknown' || !/^\d{4}-\d{2}-\d{2}$/.test(String(row.date||''))) return;
+      if (!isUsableSalarySite(siteName) || !/^\d{4}-\d{2}-\d{2}$/.test(String(row.date||''))) return;
       const range = salaryWeekRange(row.date);
       const key = `${range.start}::${siteName}`;
-      const site = siteWeekBalances.get(key) || { siteKey:key, siteName, weekStart:range.start, weekEnd:range.end, earned:0, paid:0 };
+      const site = siteWeekBalances.get(key) || { siteKey:key, siteName, weekStart:range.start, weekEnd:range.end, earned:0, paid:0, firstEarnedDate:row.date };
       site.earned += Math.max(0, +(row.earned)||0);
       site.paid += Math.max(0, +(row.paid)||0);
+      if (row.date < site.firstEarnedDate) site.firstEarnedDate = row.date;
       siteWeekBalances.set(key, site);
     });
     manualPayments.forEach(payment=>{
       const siteName = String(payment.siteName||'').trim();
-      if (!siteName || siteName.toLowerCase() === 'unknown' || !payment.weekStart) return;
+      if (!isUsableSalarySite(siteName) || !payment.weekStart) return;
       const site = siteWeekBalances.get(`${payment.weekStart}::${siteName}`);
       if (site) site.paid += Math.max(0, +(payment.amount)||0);
     });
   }
+  const applyManualPayment = (payment, predicate) => {
+    const before = new Map([...buckets.values()].map(bucket=>[bucket.weekStart,bucket.paid]));
+    allocateWeeklyPayment(buckets, payment.amount, predicate);
+    if (workerType !== 'Site Worker' || isUsableSalarySite(payment.siteName)) return;
+    const appliedByWeek = [...buckets.values()].map(bucket=>({ bucket, amount:Math.max(0,bucket.paid-(before.get(bucket.weekStart)||0)) })).filter(item=>item.amount>0);
+    appliedByWeek.forEach(({bucket,amount})=>{
+      let remaining=amount;
+      const sitesForWeek=[...siteWeekBalances.values()].filter(site=>site.weekStart===bucket.weekStart).sort((a,b)=>a.firstEarnedDate.localeCompare(b.firstEarnedDate)||a.siteName.localeCompare(b.siteName));
+      sitesForWeek.forEach(site=>{
+        if (remaining<=0) return;
+        const due=Math.max(0,site.earned-site.paid);
+        const applied=Math.min(due,remaining);
+        site.paid+=applied;
+        remaining-=applied;
+      });
+    });
+  };
   manualPayments.forEach(payment=>{
     const amount = Math.max(0, +(payment.amount)||0);
     if (!amount) return;
     if (payment.weekStart && buckets.has(payment.weekStart)) {
-      allocateWeeklyPayment(buckets, amount, bucket=>bucket.weekStart===payment.weekStart);
+      applyManualPayment(payment, bucket=>bucket.weekStart===payment.weekStart);
     } else if (payment.paymentScope === 'current-week') {
-      allocateWeeklyPayment(buckets, amount, bucket=>bucket.weekStart===current.start);
+      applyManualPayment(payment, bucket=>bucket.weekStart===current.start);
     } else if (payment.paymentScope === 'previous-weeks') {
-      allocateWeeklyPayment(buckets, amount, bucket=>bucket.weekStart<current.start);
+      applyManualPayment(payment, bucket=>bucket.weekStart<current.start);
     } else {
-      allocateWeeklyPayment(buckets, amount, ()=>true);
+      applyManualPayment(payment, ()=>true);
     }
   });
 
@@ -2999,11 +3036,13 @@ async function buildWorkerWeeklySalary(worker, workerType, asOf = indiaDateStrin
     paid:Math.min(site.earned,site.paid),
     pending:Math.max(0,site.earned-site.paid),
   })).filter(site=>site.pending>0).sort((a,b)=>b.weekStart.localeCompare(a.weekStart)||a.siteName.localeCompare(b.siteName));
+  const currentWeekSitePending = siteWeekRows.filter(site=>site.weekStart===current.start).reduce((sum,site)=>sum+site.pending,0);
   return {
     worker:{ _id:worker._id, name:worker.name, phone:worker.phone||'', workerType, totalEarnings:+(worker.totalEarnings)||0, totalPaid:+(worker.totalPaid)||0, totalPending:+(worker.totalPending)||0 },
     currentWeek,
     previousWeeks,
     currentWeekSites:siteWeekRows.filter(site=>site.weekStart===current.start),
+    currentWeekUnassignedPending:workerType==='Site Worker' ? Math.max(0,currentWeek.pending-currentWeekSitePending) : 0,
     previousWeekSites:siteWeekRows.filter(site=>site.weekStart<current.start),
     siteNames,
     previousWeeksPending:previousWeeks.reduce((sum,week)=>sum+week.pending,0),
